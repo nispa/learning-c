@@ -1,7 +1,5 @@
-/* Livelli del gioco. Ogni livello:
-   title, task (testo breve, `codice` tra apici inversi), code (codice di partenza),
-   tests: [{input, expect, patch:[[regex, sostituzione]]}], must/mustNot/maxCount: controlli sul codice,
-   noLeak: la memoria allocata deve essere liberata, hint, learn (cosa hai scoperto), solution. */
+/* Livelli del corso di C in italiano. Il formato è descritto in src/languages/README.md;
+   il riferimento è locales/en/levels.js: stessi capitoli, stessi id, stesso ordine. */
 (function (root) {
 const R = String.raw;
 const H = R`#include <stdio.h>
@@ -2131,5 +2129,5 @@ int main() {
 ];
 
 if (typeof module === 'object' && module.exports) module.exports = CHAPTERS;
-else root.CLevels = CHAPTERS;
+else ((root.CLocales = root.CLocales || {}).it = root.CLocales.it || {}).levels = CHAPTERS;
 })(typeof self !== 'undefined' ? self : this);

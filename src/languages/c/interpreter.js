@@ -8,11 +8,13 @@
 })(typeof self !== 'undefined' ? self : this, function () {
 'use strict';
 
+// I messaggi non sono testo ma [chiave, valori]: li traduce l'interfaccia con locales/<lingua>/strings.js.
+// Un valore può essere a sua volta [chiave, valori] (un pezzo di frase da tradurre).
 class CError extends Error {
-  constructor(kind, line, msg) { super(msg); this.kind = kind; this.line = line; }
+  constructor(kind, line, key, vars) { super(key); this.kind = kind; this.line = line; this.msg = [key, vars]; }
 }
-function cerr(line, msg) { throw new CError('compile', line, msg); }
-function rerr(line, msg) { throw new CError('runtime', line, msg); }
+function cerr(line, key, vars) { throw new CError('compile', line, key, vars); }
+function rerr(line, key, vars) { throw new CError('runtime', line, key, vars); }
 class ExitSig { constructor(code) { this.code = code; } }
 
 /* ================= TIPI ================= */
@@ -38,8 +40,8 @@ function tname(t) {
   switch (t.k) {
     case 'ptr': return t.to.k === 'arr' ? tname(t.to.of) + ' (*)[' + t.to.len + ']' : tname(t.to) + ' *';
     case 'arr': return tname(t.of) + '[' + (t.len == null ? '' : t.len) + ']';
-    case 'struct': return 'struct ' + (t.tag || '(senza nome)');
-    case 'func': return 'funzione';
+    case 'struct': return 'struct ' + (t.tag || '{...}');
+    case 'func': return tname(t.ret) + ' (...)';
     default: return t.name;
   }
 }
@@ -71,6 +73,9 @@ function wrap(v, t) {
     default: return t.signed ? (v << 24) >> 24 : v & 0xff;
   }
 }
+
+// Contesti costanti per i messaggi d'errore dei percorsi veloci (non allocano a ogni assegnamento).
+const CTX_INIT = ['ctx.initValue'], CTX_RETURN = ['ctx.returnValue'], CTX_PRINTF_STRING = ['ctx.printfString'], CTX_SCANF_FORMAT = ['ctx.scanfFormat'];
 
 /* ================= LIBRERIE ================= */
 const HEADERS = {
@@ -106,7 +111,7 @@ function stripComments(src) {
     if (c === '/' && d === '*') {
       const start = line; i += 2; out += ' ';
       while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') { out += '\n'; line++; } i++; }
-      if (i >= n) cerr(start, 'Il commento /* iniziato qui non è mai chiuso: manca */');
+      if (i >= n) cerr(start, 'err.unclosedComment');
       i += 2; continue;
     }
     if (c === '\n') line++;
@@ -118,10 +123,10 @@ function stripComments(src) {
 function escapeChar(s, i, line) { // s[i] === '\\'
   const c = s[i + 1];
   const simple = { n: 10, t: 9, r: 13, '0': 0, '\\': 92, "'": 39, '"': 34, a: 7, b: 8, f: 12, v: 11, '?': 63 };
-  if (c === 'x') { const m = /^[0-9a-fA-F]+/.exec(s.slice(i + 2)); if (!m) cerr(line, 'Sequenza \\x non valida'); return [parseInt(m[0], 16) & 255, 2 + m[0].length]; }
+  if (c === 'x') { const m = /^[0-9a-fA-F]+/.exec(s.slice(i + 2)); if (!m) cerr(line, 'err.badHexEscape'); return [parseInt(m[0], 16) & 255, 2 + m[0].length]; }
   if (/[0-7]/.test(c)) { const m = /^[0-7]{1,3}/.exec(s.slice(i + 1)); return [parseInt(m[0], 8) & 255, 1 + m[0].length]; }
   if (c in simple) return [simple[c], 2];
-  cerr(line, `La sequenza \\${c} non esiste in C. Quelle più usate sono \\n (a capo), \\t (tab), \\\\ e \\"`);
+  cerr(line, 'err.unknownEscape', { c });
 }
 const enc = new TextEncoder();
 function lexLine(text, line) {
@@ -137,7 +142,7 @@ function lexLine(text, line) {
       const m = /^(0[xX][0-9a-fA-F]+|[0-9]*\.?[0-9]*(?:[eE][+-]?[0-9]+)?)([uUlLfF]*)/.exec(text.slice(i));
       const body = m[1], suf = m[2].toLowerCase();
       const after = text[i + m[0].length];
-      if (after && /[A-Za-z0-9_]/.test(after)) cerr(line, `Il numero '${text.slice(i, i + m[0].length + 1)}...' è scritto male. I nomi delle variabili non possono iniziare con una cifra.`);
+      if (after && /[A-Za-z0-9_]/.test(after)) cerr(line, 'err.badNumber', { text: text.slice(i, i + m[0].length + 1) });
       const isF = !/^0[xX]/.test(body) && /[.eE]/.test(body) || (suf.includes('f') && !/^0[xX]/.test(body));
       toks.push({ t: 'num', v: body, suf, isF, line }); i += m[0].length; continue;
     }
@@ -147,30 +152,31 @@ function lexLine(text, line) {
         if (text[j] === '\\') { const [b, len] = escapeChar(text, j, line); bytes.push(b); j += len; }
         else { const cp = text.codePointAt(j); const ch = String.fromCodePoint(cp); for (const b of enc.encode(ch)) bytes.push(b); j += ch.length; }
       }
-      if (j >= n) cerr(line, 'La stringa non è chiusa: manca la virgoletta " finale su questa riga');
+      if (j >= n) cerr(line, 'err.unclosedString');
       toks.push({ t: 'str', bytes, raw: text.slice(i, j + 1), line }); i = j + 1; continue;
     }
     if (c === "'") {
       let j = i + 1, val;
       if (text[j] === '\\') { const [b, len] = escapeChar(text, j, line); val = b; j += len; }
-      else if (text[j] === "'") cerr(line, "Il carattere '' è vuoto: tra gli apici ci va esattamente un carattere, per esempio 'A'");
+      else if (text[j] === "'") cerr(line, 'err.emptyChar');
       else { const cp = text.codePointAt(j); val = cp < 256 ? cp : 63; j += String.fromCodePoint(cp).length; }
-      if (text[j] !== "'") cerr(line, "Tra gli apici singoli ' ' ci va un solo carattere. Per le parole usa le virgolette doppie \" \"");
+      if (text[j] !== "'") cerr(line, 'err.charTooLong');
       toks.push({ t: 'chr', v: val, raw: text.slice(i, j + 1), line }); i = j + 1; continue;
     }
     let op = null;
     for (const o of OPS) if (text.startsWith(o, i)) { op = o; break; }
     if (op) { toks.push({ t: 'op', v: op, line }); i += op.length; continue; }
     if (c === '“' || c === '”' || c === '‘' || c === '’' || c === '«' || c === '»')
-      cerr(line, `Il carattere ${c} è una virgoletta "tipografica" (succede quando si copia da Word o da un sito). Riscrivila con il tasto " oppure '`);
-    cerr(line, `Il carattere '${c}' non si può usare nel codice C`);
+      cerr(line, 'err.smartQuote', { c });
+    cerr(line, 'err.badChar', { c });
   }
   return toks;
 }
 
+// Il token trovato al posto di quello atteso, per i messaggi d'errore.
+function found(t) { return !t || t.t === 'eof' ? ['frag.endOfProgram'] : "'" + tokText(t) + "'"; }
 function tokText(t) {
-  if (!t) return 'la fine del programma';
-  if (t.t === 'eof') return 'la fine del programma';
+  if (!t || t.t === 'eof') return '';
   if (t.t === 'str' || t.t === 'chr') return t.raw;
   if (t.t === 'num') return t.v + (t.suf || '');
   return t.v;
@@ -214,9 +220,9 @@ function preprocess(src) {
               else if (x.t === 'op' && x.v === ',' && depth === 1) { args.push([]); continue; }
               args[args.length - 1].push(x);
             }
-            if (j >= toks.length) cerr(tk.line, `Nella macro ${tk.v}(...) manca la parentesi ) di chiusura`);
+            if (j >= toks.length) cerr(tk.line, 'err.macroUnclosed', { name: tk.v });
             if (m.params.length === 0 && args.length === 1 && args[0].length === 0) args = [];
-            if (args.length !== m.params.length) cerr(tk.line, `La macro ${tk.v} vuole ${m.params.length} argomenti, ma gliene hai dati ${args.length}`);
+            if (args.length !== m.params.length) cerr(tk.line, 'err.macroArgs', { name: tk.v, want: m.params.length, given: args.length });
             const body = [];
             for (let k = 0; k < m.body.length; k++) {
               const b = m.body[k];
@@ -266,7 +272,7 @@ function preprocess(src) {
     const peek = () => ex[p];
     function prim() {
       const t = ex[p++];
-      if (!t) cerr(ln, 'Condizione #if incompleta');
+      if (!t) cerr(ln, 'err.ifIncomplete');
       if (t.t === 'num') return Number(t.v.startsWith('0x') || t.v.startsWith('0X') ? parseInt(t.v, 16) : parseFloat(t.v));
       if (t.t === 'chr') return t.v;
       if (t.v === '(') { const v = expr(0); p++; return v; }
@@ -274,7 +280,7 @@ function preprocess(src) {
       if (t.v === '-') return -prim();
       if (t.v === '+') return prim();
       if (t.v === '~') return ~prim();
-      cerr(ln, `Nella condizione #if non capisco '${tokText(t)}'`);
+      cerr(ln, 'err.ifUnknown', { tok: tokText(t) });
     }
     const prec = { '||': 1, '&&': 2, '|': 3, '^': 4, '&': 5, '==': 6, '!=': 6, '<': 7, '>': 7, '<=': 7, '>=': 7, '<<': 8, '>>': 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10 };
     function expr(min) {
@@ -305,44 +311,44 @@ function preprocess(src) {
     const dir = m[1], rest = m[2].trim();
     if (dir === 'ifdef' || dir === 'ifndef') {
       const name = rest.split(/\s+/)[0];
-      if (!name) cerr(ln, `Dopo #${dir} ci vuole il nome di una macro`);
+      if (!name) cerr(ln, 'err.macroNameMissing', { dir });
       const v = macros.has(name) === (dir === 'ifdef');
       conds.push({ active: v, taken: v, line: ln }); continue;
     }
     if (dir === 'if') { const v = active() ? !!ppEval(lexLine(rest, ln), ln) : false; conds.push({ active: v, taken: v, line: ln }); continue; }
     if (dir === 'elif') {
-      const c = conds[conds.length - 1]; if (!c) cerr(ln, '#elif senza #if');
+      const c = conds[conds.length - 1]; if (!c) cerr(ln, 'err.elifWithoutIf');
       if (c.taken) c.active = false;
       else { conds.pop(); const v = active() ? !!ppEval(lexLine(rest, ln), ln) : false; conds.push({ active: v, taken: v, line: c.line }); }
       continue;
     }
-    if (dir === 'else') { const c = conds[conds.length - 1]; if (!c) cerr(ln, '#else senza #if o #ifdef'); c.active = !c.taken; c.taken = true; continue; }
-    if (dir === 'endif') { if (!conds.length) cerr(ln, '#endif senza #if o #ifdef'); conds.pop(); continue; }
+    if (dir === 'else') { const c = conds[conds.length - 1]; if (!c) cerr(ln, 'err.elseWithoutIf'); c.active = !c.taken; c.taken = true; continue; }
+    if (dir === 'endif') { if (!conds.length) cerr(ln, 'err.endifWithoutIf'); conds.pop(); continue; }
     if (!active()) continue;
     if (dir === 'include') {
       const mm = /^[<"]\s*([^>"]+?)\s*[>"]/.exec(rest);
-      if (!mm) cerr(ln, 'Scrivi #include così: #include <stdio.h>');
-      if (rest[0] === '"') cerr(ln, 'Qui il programma è un unico file: non puoi includere file tuoi con le virgolette. Per le librerie usa < >, per esempio #include <stdio.h>');
+      if (!mm) cerr(ln, 'err.includeSyntax');
+      if (rest[0] === '"') cerr(ln, 'err.includeQuotes');
       const h = mm[1];
-      if (!(h in HEADERS)) cerr(ln, `Non conosco la libreria <${h}>. Quelle disponibili sono: ${Object.keys(HEADERS).map(x => '<' + x + '>').join(' ')}`);
+      if (!(h in HEADERS)) cerr(ln, 'err.unknownHeader', { h, list: Object.keys(HEADERS).map(x => '<' + x + '>').join(' ') });
       headers.add(h);
       for (const [k, v] of Object.entries(HEADERS[h])) if (!macros.has(k)) defineStr(k, v);
       continue;
     }
     if (dir === 'define') {
       const dm = /^([A-Za-z_]\w*)(\(([^)]*)\))?\s*(.*)$/.exec(rest);
-      if (!dm) cerr(ln, 'Scrivi #define così: #define NOME valore');
+      if (!dm) cerr(ln, 'err.defineSyntax');
       const params = dm[2] !== undefined ? dm[3].split(',').map(x => x.trim()).filter(x => x) : null;
       macros.set(dm[1], { params, body: lexLine(dm[4], ln) });
       continue;
     }
     if (dir === 'undef') { macros.delete(rest.split(/\s+/)[0]); continue; }
-    if (dir === 'error') cerr(ln, '#error ' + rest);
+    if (dir === 'error') cerr(ln, 'err.hashError', { text: rest });
     if (dir === 'pragma' || dir === 'warning' || dir === '') continue;
-    cerr(ln, `La direttiva #${dir} non esiste (quelle comuni sono #include, #define, #ifdef, #ifndef, #if, #else, #endif)`);
+    cerr(ln, 'err.unknownDirective', { dir });
   }
   flush();
-  if (conds.length) cerr(conds[conds.length - 1].line, 'Questo #if/#ifdef non è mai chiuso: manca #endif');
+  if (conds.length) cerr(conds[conds.length - 1].line, 'err.ifUnclosed');
   const lastLine = lines.length ? lines[lines.length - 1].ln : 1;
   out.push({ t: 'eof', v: '', line: lastLine });
   return { tokens: out, headers, macros };
@@ -381,7 +387,7 @@ function lev(a, b) {
 function suggest(name, cands) {
   let best = null, bd = 99;
   for (const c of cands) { if (c === name) continue; const d = lev(name.toLowerCase(), c.toLowerCase()); if (d < bd) { bd = d; best = c; } }
-  if (best && (bd <= 1 || (bd <= 2 && name.length > 4))) return ` Forse volevi scrivere '${best}'?`;
+  if (best && (bd <= 1 || (bd <= 2 && name.length > 4))) return ['hint.didYouMean', { name: best }];
   return '';
 }
 
@@ -430,13 +436,13 @@ class Parser {
     const t = this.peek();
     if (v === ';') {
       const pl = this.prev().line;
-      cerr(pl, `Manca il punto e virgola ';' alla fine dell'istruzione${ctx ? ' (' + ctx + ')' : ''}.`);
+      cerr(pl, ctx ? 'err.missingSemicolonCtx' : 'err.missingSemicolon', { ctx });
     }
-    if (t.t === 'eof') cerr(this.prev().line, `Il programma finisce all'improvviso: mi aspettavo '${v}'. Controlla che tutte le parentesi siano chiuse.`);
-    const extra = (v === ')' && t.t === 'op' && t.v === ';') ? ' Forse manca una parentesi ) di chiusura.' : '';
-    cerr(t.line, `Mi aspettavo '${v}'${ctx ? ' ' + ctx : ''}, ma ho trovato '${tokText(t)}'.${extra}`);
+    if (t.t === 'eof') cerr(this.prev().line, 'err.unexpectedEnd', { v });
+    const hint = (v === ')' && t.t === 'op' && t.v === ';') ? ['hint.missingCloseParen'] : '';
+    cerr(t.line, ctx ? 'err.expectedCtx' : 'err.expected', { v, ctx, found: found(t), hint });
   }
-  err(msg, t) { cerr((t || this.peek()).line, msg); }
+  err(key, vars) { cerr(this.peek().line, key, vars); }
   pushScope() { this.scopes.push(new Map()); }
   popScope() { this.scopes.pop(); }
   lookup(name) { for (let i = this.scopes.length - 1; i >= 0; i--) { const s = this.scopes[i].get(name); if (s) return s; } return null; }
@@ -444,7 +450,7 @@ class Parser {
     const sc = this.scopes[this.scopes.length - 1];
     const old = sc.get(name);
     if (old && !(old.kind === 'func' && info.kind === 'func') && !(old.kind === 'var' && old.extern)) {
-      cerr(line, `Il nome '${name}' è già stato usato in questo blocco (alla riga ${old.line}). Due variabili nello stesso blocco devono avere nomi diversi.`);
+      cerr(line, 'err.duplicateName', { name, line: old.line });
     }
     sc.set(name, { ...info, line });
   }
@@ -470,14 +476,14 @@ class Parser {
     for (const c of this.calls) {
       if (c.resolved) continue;
       if (this.funcTypes.has(c.name)) {
-        cerr(c.line, `La funzione '${c.name}' è usata prima di essere dichiarata. In C il compilatore legge dall'alto in basso: sposta la funzione '${c.name}' sopra, oppure scrivi il suo prototipo (per esempio  ${this.protoText(c.name)}) prima di usarla.`);
+        cerr(c.line, 'err.funcUsedBeforeDecl', { name: c.name, proto: this.protoText(c.name) });
       }
       const b = BUILTINS[c.name];
-      if (b) cerr(c.line, `Per usare ${c.name} devi scrivere all'inizio del programma:  #include <${b.h}>`);
-      cerr(c.line, `La funzione '${c.name}' non esiste.${suggest(c.name, [...this.funcTypes.keys(), ...Object.keys(BUILTINS)])}`);
+      if (b) cerr(c.line, 'err.missingInclude', { name: c.name, h: b.h });
+      cerr(c.line, 'err.unknownFunc', { name: c.name, suggest: suggest(c.name, [...this.funcTypes.keys(), ...Object.keys(BUILTINS)]) });
     }
     if (!this.funcDefs.has('main')) {
-      cerr(this.peek().line, "Manca la funzione main. Ogni programma C comincia da main, per esempio:  int main() { ... return 0; }");
+      cerr(this.peek().line, 'err.noMain');
     }
     return { funcs: this.funcDefs, globals: this.globals, strings: this.strings, warnings: this.warnings, funcTypes: this.funcTypes };
   }
@@ -497,7 +503,7 @@ class Parser {
       if (v === 'typedef' || v === 'static' || v === 'extern' || v === 'register' || v === 'auto') { storage = v; this.p++; any = true; continue; }
       if (v === 'const' || v === 'volatile' || v === 'inline' || v === 'restrict') { this.p++; any = true; continue; }
       if (['signed', 'unsigned', 'short', 'long', 'int', 'char', 'float', 'double', 'void', '_Bool'].includes(v)) { cnt[v] = (cnt[v] || 0) + 1; this.p++; any = true; continue; }
-      if (v === 'struct' || v === 'union') { if (v === 'union') this.err('union non è supportata in questo sito'); this.p++; base = this.parseStruct(); any = true; continue; }
+      if (v === 'struct' || v === 'union') { if (v === 'union') this.err('err.unionUnsupported'); this.p++; base = this.parseStruct(); any = true; continue; }
       if (v === 'enum') { this.p++; base = this.parseEnum(); any = true; continue; }
       if (this.typedefs.has(v) && base === null && Object.keys(cnt).length === 0) {
         const l = this.lookup(v); if (l && l.kind !== 'typedef') break;
@@ -515,7 +521,7 @@ class Parser {
       else if (cnt.short) base = cnt.unsigned ? TY.ushort : TY.short;
       else if (cnt.long) base = cnt.unsigned ? TY.ulong : TY.long;
       else if (cnt.int || cnt.signed || cnt.unsigned) base = cnt.unsigned ? TY.uint : TY.int;
-      else cerr(line, 'Manca il tipo (per esempio int, char, float...)');
+      else cerr(line, 'err.missingType');
     }
     return { t: base, storage, line };
   }
@@ -525,27 +531,27 @@ class Parser {
     let st = tag ? this.structs.get(tag) : null;
     if (!st) { st = { k: 'struct', tag, fields: null, size: 0, align: 1 }; if (tag) this.structs.set(tag, st); }
     if (this.acceptOp('{')) {
-      if (st.fields) cerr(line, `La struct ${tag} è definita due volte`);
+      if (st.fields) cerr(line, 'err.structTwice', { tag });
       const fields = []; let off = 0, al = 1;
       while (!this.acceptOp('}')) {
-        if (this.peek().t === 'eof') cerr(line, 'Manca la } che chiude la struct');
+        if (this.peek().t === 'eof') cerr(line, 'err.structUnclosed');
         const sp = this.parseDeclSpecs();
-        if (!sp) this.err(`Dentro la struct mi aspettavo un campo (per esempio int x;), ho trovato '${tokText(this.peek())}'`);
+        if (!sp) this.err('err.structFieldExpected', { found: found(this.peek()) });
         do {
           const d = this.parseDeclarator(sp.t, false);
-          if (d.vla) cerr(d.line, 'Gli array dentro una struct devono avere una dimensione costante');
-          if (d.t.k === 'struct' && !d.t.fields) cerr(d.line, `La struct ${d.t.tag} non è ancora completa: dentro una struct puoi usare solo un puntatore a se stessa`);
-          if (fields.some(f => f.name === d.name)) cerr(d.line, `Il campo '${d.name}' è ripetuto due volte`);
+          if (d.vla) cerr(d.line, 'err.structVlaField');
+          if (d.t.k === 'struct' && !d.t.fields) cerr(d.line, 'err.structIncomplete', { tag: d.t.tag });
+          if (fields.some(f => f.name === d.name)) cerr(d.line, 'err.fieldTwice', { name: d.name });
           const a = alignOf(d.t); off = Math.ceil(off / a) * a; al = Math.max(al, a);
           fields.push({ name: d.name, t: d.t, off }); off += d.t.size;
         } while (this.acceptOp(','));
-        this.expectOp(';', 'dopo il campo della struct');
+        this.expectOp(';', ['ctx.afterStructField']);
       }
       st.fields = fields; st.align = al; st.size = Math.max(1, Math.ceil(off / al) * al);
       if (!this.isOp(';') && this.p < this.toks.length && this.peek().t !== 'id' && !this.isOp('*')) {
         // ok
       }
-    } else if (!tag) this.err('Dopo struct ci vuole un nome o le parentesi { }');
+    } else if (!tag) this.err('err.structNameExpected');
     return st;
   }
   parseEnum() {
@@ -553,10 +559,10 @@ class Parser {
     if (this.acceptOp('{')) {
       let val = 0;
       while (!this.acceptOp('}')) {
-        const t = this.next(); if (t.t !== 'id') cerr(t.line, 'Dentro enum { } ci vanno dei nomi');
-        if (this.acceptOp('=')) { const e = this.parseCond(); const c = this.constVal(e); if (c === undefined) cerr(t.line, 'Il valore di un enum deve essere costante'); val = c; }
+        const t = this.next(); if (t.t !== 'id') cerr(t.line, 'err.enumNames');
+        if (this.acceptOp('=')) { const e = this.parseCond(); const c = this.constVal(e); if (c === undefined) cerr(t.line, 'err.enumConst'); val = c; }
         this.declare(t.v, { kind: 'enum', val }, t.line); val++;
-        if (!this.acceptOp(',')) { this.expectOp('}', 'per chiudere enum'); break; }
+        if (!this.acceptOp(',')) { this.expectOp('}', ['ctx.close', { what: 'enum' }]); break; }
       }
     }
     return TY.int;
@@ -567,15 +573,15 @@ class Parser {
     let name = null; const line = this.peek().line;
     const tk = this.peek();
     if (tk.t === 'id' && !KEYWORDS.has(tk.v)) { name = tk.v; this.p++; }
-    else if (tk.t === 'id' && KEYWORDS.has(tk.v) && !abstract) cerr(tk.line, `'${tk.v}' è una parola riservata del C: non puoi usarla come nome di variabile`);
-    else if (this.isOp('(') && !abstract) cerr(tk.line, 'Questa forma di dichiarazione (puntatori a funzione) non è supportata in questo sito');
+    else if (tk.t === 'id' && KEYWORDS.has(tk.v) && !abstract) cerr(tk.line, 'err.reservedWord', { word: tk.v });
+    else if (this.isOp('(') && !abstract) cerr(tk.line, 'err.funcPtrUnsupported');
     else if (!abstract) {
-      if (tk.t === 'num') cerr(tk.line, `Il nome di una variabile non può iniziare con un numero ('${tokText(tk)}')`);
-      cerr(tk.line, `Mi aspettavo il nome di una variabile, ma ho trovato '${tokText(tk)}'`);
+      if (tk.t === 'num') cerr(tk.line, 'err.nameStartsWithDigit', { tok: tokText(tk) });
+      cerr(tk.line, 'err.nameExpected', { found: found(tk) });
     }
     const dims = []; let fn = null;
     for (;;) {
-      if (this.acceptOp('[')) { if (this.acceptOp(']')) dims.push(null); else { const e = this.parseAssign(); this.expectOp(']', 'per chiudere la dimensione dell\'array'); dims.push(e); } }
+      if (this.acceptOp('[')) { if (this.acceptOp(']')) dims.push(null); else { const e = this.parseAssign(); this.expectOp(']', ['ctx.closeArrayDim']); dims.push(e); } }
       else if (this.isOp('(') && !dims.length && !fn && name) { this.p++; fn = this.parseParams(); }
       else break;
     }
@@ -586,8 +592,8 @@ class Parser {
         return { name, line, t: null, vla: { base: t, dims } };
       }
       for (let i = 0; i < lens.length; i++) {
-        if (i > 0 && lens[i] === null) cerr(line, 'Solo la prima dimensione di un array può essere lasciata vuota');
-        if (lens[i] !== null && lens[i] <= 0) cerr(line, `La dimensione di un array deve essere maggiore di zero (hai scritto ${lens[i]})`);
+        if (i > 0 && lens[i] === null) cerr(line, 'err.onlyFirstDimEmpty');
+        if (lens[i] !== null && lens[i] <= 0) cerr(line, 'err.arrayDimPositive', { n: lens[i] });
       }
       for (let i = lens.length - 1; i >= 0; i--) t = arrT(t, lens[i]);
     }
@@ -600,20 +606,20 @@ class Parser {
     for (;;) {
       if (this.acceptOp('...')) { variadic = true; break; }
       const sp = this.parseDeclSpecs();
-      if (!sp) this.err(`Nei parametri della funzione mi aspettavo un tipo (per esempio int x), ho trovato '${tokText(this.peek())}'`);
+      if (!sp) this.err('err.paramTypeExpected', { found: found(this.peek()) });
       const d = this.parseDeclarator(sp.t, true);
       let t = d.t;
       if (d.vla) { // es: int v[n] oppure int m[][n]
         let base = d.vla.base;
-        for (let i = d.vla.dims.length - 1; i >= 1; i--) { const c = this.constVal(d.vla.dims[i]); if (c === undefined) cerr(d.line, 'Nei parametri, le dimensioni dopo la prima devono essere costanti'); base = arrT(base, c); }
+        for (let i = d.vla.dims.length - 1; i >= 1; i--) { const c = this.constVal(d.vla.dims[i]); if (c === undefined) cerr(d.line, 'err.paramDimsConst'); base = arrT(base, c); }
         t = ptrT(base);
       }
       if (t.k === 'arr') t = ptrT(t.of);
-      if (t.k === 'void') cerr(d.line, 'Un parametro non può essere di tipo void');
+      if (t.k === 'void') cerr(d.line, 'err.voidParam');
       types.push(t); names.push(d.name);
       if (!this.acceptOp(',')) break;
     }
-    this.expectOp(')', 'per chiudere i parametri');
+    this.expectOp(')', ['ctx.closeParams']);
     return { types, names, variadic };
   }
 
@@ -621,23 +627,23 @@ class Parser {
     const start = this.peek();
     const sp = this.parseDeclSpecs();
     if (!sp) {
-      if (start.t === 'id' && this.isOp('(', 1)) cerr(start.line, `Manca il tipo prima di '${start.v}'. Scrivi per esempio:  int ${start.v}(...)`);
-      if (start.t === 'op' && start.v === '}') cerr(start.line, 'C\'è una parentesi graffa } di troppo');
-      cerr(start.line, `Fuori dalle funzioni mi aspettavo una dichiarazione (per esempio  int main() { ... }), ho trovato '${tokText(start)}'. Tutte le istruzioni devono stare dentro una funzione.`);
+      if (start.t === 'id' && this.isOp('(', 1)) cerr(start.line, 'err.missingTypeBefore', { name: start.v });
+      if (start.t === 'op' && start.v === '}') cerr(start.line, 'err.extraBrace');
+      cerr(start.line, 'err.declExpected', { found: found(start) });
     }
     if (this.acceptOp(';')) return;
     let first = true;
     for (;;) {
       const d = this.parseDeclarator(sp.t, false);
       if (sp.storage === 'typedef') {
-        if (d.vla) cerr(d.line, 'typedef con dimensione non costante non è supportato');
+        if (d.vla) cerr(d.line, 'err.typedefVla');
         this.typedefs.set(d.name, d.t); this.declare(d.name, { kind: 'typedef' }, d.line);
       } else if (d.t && d.t.k === 'func') {
         this.declareFunc(d);
         if (first && this.isOp('{')) { this.parseFuncDef(d); return; }
       } else {
-        if (d.vla) cerr(d.line, 'Gli array globali devono avere una dimensione costante (usa un numero o una #define)');
-        if (d.t.k === 'void') cerr(d.line, 'Una variabile non può essere di tipo void');
+        if (d.vla) cerr(d.line, 'err.globalVla');
+        if (d.t.k === 'void') cerr(d.line, 'err.voidVar');
         let init = null;
         if (this.acceptOp('=')) init = this.parseInitializer();
         const t = this.fixArrayLen(d.t, init, d.line);
@@ -647,20 +653,20 @@ class Parser {
       first = false;
       if (!this.acceptOp(',')) break;
     }
-    if (this.isOp('{')) cerr(this.peek().line, 'Prima di { forse c\'è un punto e virgola di troppo, oppure la funzione è scritta male');
+    if (this.isOp('{')) cerr(this.peek().line, 'err.braceAfterSemicolon');
     this.expectOp(';');
   }
   declareFunc(d) {
     const old = this.funcTypes.get(d.name);
     if (old && (old.params.length !== d.t.params.length) && !old.noproto && !d.t.noproto)
-      cerr(d.line, `La funzione '${d.name}' è dichiarata due volte con parametri diversi`);
+      cerr(d.line, 'err.funcRedeclared', { name: d.name });
     if (!old || old.noproto) this.funcTypes.set(d.name, d.t);
     this.scopes[0].set(d.name, { kind: 'func', t: d.t, line: d.line });
   }
   parseFuncDef(d) {
-    if (this.funcDefs.has(d.name)) cerr(d.line, `La funzione '${d.name}' è scritta due volte (la prima alla riga ${this.funcLines.get(d.name)})`);
-    if (d.name === 'main' && d.t.ret !== TY.int && d.t.ret !== TY.void) cerr(d.line, 'main deve restituire int:  int main()');
-    d.t.params.forEach((pt, i) => { if (!d.t.names[i]) cerr(d.line, `Il parametro n. ${i + 1} della funzione '${d.name}' non ha un nome`); });
+    if (this.funcDefs.has(d.name)) cerr(d.line, 'err.funcTwice', { name: d.name, line: this.funcLines.get(d.name) });
+    if (d.name === 'main' && d.t.ret !== TY.int && d.t.ret !== TY.void) cerr(d.line, 'err.mainReturnsInt');
+    d.t.params.forEach((pt, i) => { if (!d.t.names[i]) cerr(d.line, 'err.paramUnnamed', { n: i + 1, name: d.name }); });
     this.funcTypes.set(d.name, d.t);
     this.funcLines.set(d.name, d.line);
     this.curFunc = { name: d.name, ret: d.t.ret };
@@ -674,11 +680,11 @@ class Parser {
   }
   fixArrayLen(t, init, line) {
     if (t.k === 'arr' && t.len == null) {
-      if (!init) cerr(line, 'Se non scrivi la dimensione dell\'array tra [ ], devi dargli dei valori iniziali, per esempio  int v[] = {1, 2, 3};');
+      if (!init) cerr(line, 'err.arrayNeedsInit');
       let n;
       if (init.k === 'str') n = init.bytes.length + 1;
       else if (init.k === 'initlist') n = init.items.length;
-      else cerr(line, 'Un array si inizializza con { ... }');
+      else cerr(line, 'err.arrayInitBraces');
       return arrT(t.of, n);
     }
     return t;
@@ -687,9 +693,9 @@ class Parser {
     if (this.isOp('{')) {
       const line = this.next().line; const items = [];
       while (!this.acceptOp('}')) {
-        if (this.acceptOp('.')) { this.err('Gli inizializzatori con .campo = non sono supportati: metti i valori in ordine'); }
+        if (this.acceptOp('.')) { this.err('err.designatedInit'); }
         items.push(this.parseInitializer());
-        if (!this.acceptOp(',')) { this.expectOp('}', 'per chiudere la lista di valori'); break; }
+        if (!this.acceptOp(',')) { this.expectOp('}', ['ctx.closeInitList']); break; }
       }
       return { k: 'initlist', items, line };
     }
@@ -697,11 +703,11 @@ class Parser {
   }
   parseBlock(newScope = true) {
     const open = this.peek();
-    this.expectOp('{', open.t === 'op' && open.v === ';' ? '(forse c\'è un ; di troppo dopo la parentesi )' : '');
+    this.expectOp('{', open.t === 'op' && open.v === ';' ? ['ctx.extraSemicolonParen'] : '');
     if (newScope) this.pushScope();
     const items = [];
     while (!this.acceptOp('}')) {
-      if (this.peek().t === 'eof') cerr(open.line, 'La parentesi graffa { aperta qui non viene mai chiusa: manca }');
+      if (this.peek().t === 'eof') cerr(open.line, 'err.braceUnclosed');
       items.push(this.parseBlockItem());
     }
     if (newScope) this.popScope();
@@ -721,12 +727,12 @@ class Parser {
       else if (d.t && d.t.k === 'func') { this.declareFunc(d); }
       else {
         let init = null;
-        if (d.t && d.t.k === 'void') cerr(d.line, 'Una variabile non può essere di tipo void');
+        if (d.t && d.t.k === 'void') cerr(d.line, 'err.voidVar');
         if (this.acceptOp('=')) init = this.parseInitializer();
         let t = d.t;
         if (t) t = this.fixArrayLen(t, init, d.line);
-        if (d.vla && init) cerr(d.line, 'Un array con dimensione variabile non si può inizializzare con = ...');
-        if (t && t.k === 'struct' && !t.fields) cerr(d.line, `La struct ${t.tag} non è stata definita (mancano i campi { ... })`);
+        if (d.vla && init) cerr(d.line, 'err.vlaInit');
+        if (t && t.k === 'struct' && !t.fields) cerr(d.line, 'err.structUndefined', { tag: t.tag });
         this.declare(d.name, { kind: 'var', t: t || { k: 'vla' } }, d.line);
         decls.push({ name: d.name, t, vla: d.vla, init, line: d.line, isStatic: sp.storage === 'static' });
       }
@@ -736,17 +742,17 @@ class Parser {
     return { k: 'decl', decls, line };
   }
   condWarn(e, what) {
-    if (e && e.k === 'assign' && e.op === '=') this.warnings.push({ line: e.line, msg: `Nella condizione di ${what} hai scritto = (che assegna un valore). Per confrontare due valori si usa ==` });
+    if (e && e.k === 'assign' && e.op === '=') this.warnings.push({ line: e.line, msg: ['warn.assignInCond', { what }] });
   }
   parseParenCond(what) {
-    this.expectOp('(', `dopo ${what}`);
+    this.expectOp('(', ['ctx.after', { what }]);
     const e = this.parseExpr();
-    this.expectOp(')', `per chiudere la condizione di ${what}`);
+    this.expectOp(')', ['ctx.closeCond', { what }]);
     this.condWarn(e, what);
     return e;
   }
   semiWarn(what) {
-    if (this.isOp(';')) this.warnings.push({ line: this.peek().line, msg: `C'è un punto e virgola subito dopo ${what}(...): così ${what} non ha corpo. Di solito è un errore.` });
+    if (this.isOp(';')) this.warnings.push({ line: this.peek().line, msg: ['warn.semicolonAfter', { what }] });
   }
   parseStmt() {
     const t = this.peek(); const line = t.line;
@@ -760,7 +766,7 @@ class Parser {
           if (this.acceptKw('else')) b = this.parseSubStmt();
           return { k: 'if', c, a, b, line };
         }
-        case 'else': cerr(line, 'Questo else non ha un if prima. Controlla le parentesi graffe { } e che non ci sia un ; dopo la } dell\'if');
+        case 'else': cerr(line, 'err.danglingElse');
         case 'while': {
           this.p++; const c = this.parseParenCond('while'); this.semiWarn('while');
           this.loopDepth++; const body = this.parseSubStmt(); this.loopDepth--;
@@ -768,33 +774,33 @@ class Parser {
         }
         case 'do': {
           this.p++; this.loopDepth++; const body = this.parseSubStmt(); this.loopDepth--;
-          if (!this.acceptKw('while')) cerr(this.peek().line, 'Dopo il blocco do { ... } ci vuole  while (condizione);');
+          if (!this.acceptKw('while')) cerr(this.peek().line, 'err.doWhileMissing');
           const c = this.parseParenCond('while');
-          this.expectOp(';', 'dopo il while del do-while');
+          this.expectOp(';', ['ctx.afterDoWhile']);
           return { k: 'do', c, body, line };
         }
         case 'for': {
-          this.p++; this.expectOp('(', 'dopo for'); this.pushScope();
+          this.p++; this.expectOp('(', ['ctx.after', { what: 'for' }]); this.pushScope();
           let init = null;
           if (this.isTypeStart()) init = this.parseLocalDecl();
-          else { if (!this.isOp(';')) init = { k: 'expr', e: this.parseExpr(), line }; this.expectOp(';', 'nel for: dopo la prima parte ci vuole ;'); }
-          let c = null; if (!this.isOp(';')) c = this.parseExpr(); this.expectOp(';', 'nel for: dopo la condizione ci vuole ;');
+          else { if (!this.isOp(';')) init = { k: 'expr', e: this.parseExpr(), line }; this.expectOp(';', ['ctx.forInit']); }
+          let c = null; if (!this.isOp(';')) c = this.parseExpr(); this.expectOp(';', ['ctx.forCond']);
           this.condWarn(c, 'for');
           let step = null; if (!this.isOp(')')) step = this.parseExpr();
-          this.expectOp(')', 'per chiudere il for');
+          this.expectOp(')', ['ctx.close', { what: 'for' }]);
           this.semiWarn('for');
           this.loopDepth++; const body = this.parseSubStmt(); this.loopDepth--;
           this.popScope();
           return { k: 'for', init, c, step, body, line };
         }
         case 'switch': {
-          this.p++; this.expectOp('(', 'dopo switch'); const e = this.parseExpr(); this.expectOp(')', 'per chiudere switch');
+          this.p++; this.expectOp('(', ['ctx.after', { what: 'switch' }]); const e = this.parseExpr(); this.expectOp(')', ['ctx.close', { what: 'switch' }]);
           this.switchDepth++; const body = this.parseBlock(); this.switchDepth--;
           const seq = []; const labels = new Map(); let def = -1;
           const flat = (it) => {
             if (it.k === 'case' || it.k === 'default') {
-              if (it.k === 'default') { if (def >= 0) cerr(it.line, 'Nello switch ci può essere un solo default'); def = seq.length; }
-              else { if (labels.has(it.val)) cerr(it.line, `Il case ${it.val} è ripetuto due volte nello switch`); labels.set(it.val, seq.length); }
+              if (it.k === 'default') { if (def >= 0) cerr(it.line, 'err.switchTwoDefaults'); def = seq.length; }
+              else { if (labels.has(it.val)) cerr(it.line, 'err.caseTwice', { val: it.val }); labels.set(it.val, seq.length); }
               flat(it.stmt);
             } else seq.push(it);
           };
@@ -802,30 +808,30 @@ class Parser {
           return { k: 'switch', e, seq, labels, def, line };
         }
         case 'case': case 'default': {
-          if (!this.switchDepth) cerr(line, `'${t.v}' si può usare solo dentro uno switch`);
+          if (!this.switchDepth) cerr(line, 'err.caseOutsideSwitch', { word: t.v });
           this.p++; let val;
           if (t.v === 'case') {
             const e = this.parseCond(); val = this.constVal(e);
-            if (val === undefined) cerr(line, 'Dopo case ci vuole un valore costante (un numero o un carattere come \'a\')');
+            if (val === undefined) cerr(line, 'err.caseConst');
           }
-          this.expectOp(':', t.v === 'case' ? 'dopo il valore del case' : 'dopo default');
+          this.expectOp(':', t.v === 'case' ? ['ctx.afterCaseValue'] : ['ctx.after', { what: 'default' }]);
           let stmt;
           if (this.isOp('}')) stmt = { k: 'empty', line };
           else stmt = this.isTypeStart() ? this.parseLocalDecl() : this.parseStmt();
           return { k: t.v, val, stmt, line };
         }
-        case 'break': this.p++; if (!this.loopDepth && !this.switchDepth) cerr(line, 'break si può usare solo dentro un ciclo (for, while, do) o uno switch'); this.expectOp(';'); return { k: 'break', line };
-        case 'continue': this.p++; if (!this.loopDepth) cerr(line, 'continue si può usare solo dentro un ciclo (for, while, do)'); this.expectOp(';'); return { k: 'continue', line };
+        case 'break': this.p++; if (!this.loopDepth && !this.switchDepth) cerr(line, 'err.breakOutside'); this.expectOp(';'); return { k: 'break', line };
+        case 'continue': this.p++; if (!this.loopDepth) cerr(line, 'err.continueOutside'); this.expectOp(';'); return { k: 'continue', line };
         case 'return': {
           this.p++; let e = null;
           if (!this.isOp(';')) e = this.parseExpr();
           const f = this.curFunc;
-          if (e && f.ret === TY.void) cerr(line, `La funzione '${f.name}' è void: non può restituire un valore. Scrivi solo  return;  oppure cambia il tipo della funzione.`);
-          if (!e && f.ret !== TY.void && f.name !== 'main') cerr(line, `La funzione '${f.name}' deve restituire un valore di tipo ${tname(f.ret)}: scrivi return seguito dal valore.`);
-          this.expectOp(';', 'dopo return');
+          if (e && f.ret === TY.void) cerr(line, 'err.voidReturnsValue', { name: f.name });
+          if (!e && f.ret !== TY.void && f.name !== 'main') cerr(line, 'err.returnNeedsValue', { name: f.name, type: tname(f.ret) });
+          this.expectOp(';', ['ctx.after', { what: 'return' }]);
           return { k: 'return', e, line };
         }
-        case 'goto': cerr(line, 'goto non è supportato in questo sito (e di solito è meglio non usarlo!)');
+        case 'goto': cerr(line, 'err.gotoUnsupported');
       }
     }
     const e = this.parseExpr();
@@ -833,7 +839,7 @@ class Parser {
     return { k: 'expr', e, line };
   }
   parseSubStmt() {
-    if (this.isTypeStart()) cerr(this.peek().line, 'Qui non puoi dichiarare una variabile: mettila dentro le parentesi graffe { }');
+    if (this.isTypeStart()) cerr(this.peek().line, 'err.declNotAllowed');
     return this.parseStmt();
   }
 
@@ -849,7 +855,7 @@ class Parser {
     if (t.t === 'op' && ['=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>='].includes(t.v)) {
       this.p++;
       if (!['id', 'idx', 'mem', 'un'].includes(l.k) || (l.k === 'un' && l.op !== '*')) {
-        cerr(t.line, `A sinistra di ${t.v} ci deve essere una variabile (qualcosa che può contenere un valore), non '${exprText(l)}'.` + (t.v === '=' ? ' Per confrontare si usa ==' : ''));
+        cerr(t.line, 'err.notAssignable', { op: t.v, expr: exprText(l), hint: t.v === '=' ? ['hint.compareWithEq'] : '' });
       }
       const r = this.parseAssign();
       return { k: 'assign', op: t.v, l, r, line: t.line };
@@ -879,7 +885,7 @@ class Parser {
   parseTypeName() {
     const sp = this.parseDeclSpecs();
     const d = this.parseDeclarator(sp.t, true);
-    if (d.vla) cerr(d.line, 'Dimensione non costante non ammessa qui');
+    if (d.vla) cerr(d.line, 'err.vlaNotAllowed');
     return d.t;
   }
   parseUnary() {
@@ -892,14 +898,14 @@ class Parser {
         return { k: 'un', op: t.v, e, line };
       }
       if (t.v === '(' && this.isTypeStart(1)) {
-        this.p++; const ty = this.parseTypeName(); this.expectOp(')', 'dopo il tipo del cast');
-        if (this.isOp('{')) cerr(line, 'I "compound literal" non sono supportati');
+        this.p++; const ty = this.parseTypeName(); this.expectOp(')', ['ctx.afterCastType']);
+        if (this.isOp('{')) cerr(line, 'err.compoundLiteral');
         return { k: 'cast', t: ty, e: this.parseCastOrUnary(), line };
       }
     }
     if (t.t === 'id' && t.v === 'sizeof') {
       this.p++;
-      if (this.isOp('(') && this.isTypeStart(1)) { this.p++; const ty = this.parseTypeName(); this.expectOp(')', 'dopo sizeof(tipo'); return { k: 'sizeofT', t: ty, line }; }
+      if (this.isOp('(') && this.isTypeStart(1)) { this.p++; const ty = this.parseTypeName(); this.expectOp(')', ['ctx.afterSizeofType']); return { k: 'sizeofT', t: ty, line }; }
       return { k: 'sizeofE', e: this.parseUnary(), line };
     }
     return this.parsePostfix();
@@ -907,31 +913,31 @@ class Parser {
   parseCastOrUnary() { return this.parseUnary(); }
   checkLv(e, op, line) {
     const ok = e.k === 'id' || e.k === 'idx' || e.k === 'mem' || (e.k === 'un' && e.op === '*');
-    if (!ok) cerr(line, op === '&' ? `L'operatore & (indirizzo di) si usa solo con le variabili, non con '${exprText(e)}'` : `${op} si usa solo con le variabili, non con '${exprText(e)}'`);
+    if (!ok) cerr(line, op === '&' ? 'err.addrOfNonVar' : 'err.opNeedsVar', { op, expr: exprText(e) });
   }
   parsePostfix() {
     let e = this.parsePrimary();
     for (;;) {
       const t = this.peek();
       if (t.t !== 'op') break;
-      if (t.v === '[') { this.p++; const i = this.parseExpr(); this.expectOp(']', 'per chiudere l\'indice'); e = { k: 'idx', a: e, i, line: t.line }; }
+      if (t.v === '[') { this.p++; const i = this.parseExpr(); this.expectOp(']', ['ctx.closeIndex']); e = { k: 'idx', a: e, i, line: t.line }; }
       else if (t.v === '(') {
-        if (e.k === 'id') cerr(t.line, `'${e.name}' è una variabile, non una funzione`);
-        if (e.k !== 'fid') cerr(t.line, 'Qui ci vuole il nome di una funzione prima di (');
+        if (e.k === 'id') cerr(t.line, 'err.notAFunction', { name: e.name });
+        if (e.k !== 'fid') cerr(t.line, 'err.funcNameExpected');
         this.p++; const args = [];
-        if (!this.acceptOp(')')) { do { args.push(this.parseAssign()); } while (this.acceptOp(',')); this.expectOp(')', `per chiudere la chiamata di ${e.name}`); }
+        if (!this.acceptOp(')')) { do { args.push(this.parseAssign()); } while (this.acceptOp(',')); this.expectOp(')', ['ctx.closeCall', { name: e.name }]); }
         e = { k: 'call', name: e.name, args, line: t.line };
         this.checkCall(e);
       }
       else if (t.v === '.' || t.v === '->') {
         this.p++; const n = this.next();
-        if (n.t !== 'id') cerr(n.line, `Dopo ${t.v} ci vuole il nome di un campo`);
+        if (n.t !== 'id') cerr(n.line, 'err.fieldNameExpected', { op: t.v });
         e = { k: 'mem', e, name: n.v, arrow: t.v === '->', line: t.line };
       }
       else if (t.v === '++' || t.v === '--') { this.p++; this.checkLv(e, t.v, t.line); e = { k: 'post', op: t.v, e, line: t.line }; }
       else break;
     }
-    if (e.k === 'fid') cerr(e.line, `'${e.name}' è una funzione: per chiamarla scrivi ${e.name}(...)`);
+    if (e.k === 'fid') cerr(e.line, 'err.funcNotCalled', { name: e.name });
     return e;
   }
   checkCall(c) {
@@ -943,13 +949,13 @@ class Parser {
       rec.resolved = true;
       if (ft && !ft.noproto) {
         const n = ft.params.length;
-        if (!ft.variadic && c.args.length !== n) cerr(c.line, `La funzione '${c.name}' vuole ${n} ${n === 1 ? 'valore' : 'valori'} tra le parentesi, ma gliene hai ${c.args.length === 1 ? 'dato' : 'dati'} ${c.args.length}. Prototipo: ${this.protoText(c.name)}`);
+        if (!ft.variadic && c.args.length !== n) cerr(c.line, 'err.argCount', { name: c.name, want: ['frag.values', { n }], given: ['frag.given', { n: c.args.length }], proto: this.protoText(c.name) });
       }
     } else if (b && this.headers.has(b.h)) {
       rec.resolved = true; c.builtin = true;
-      if (c.args.length < b.min) cerr(c.line, `A ${c.name} mancano dei valori tra le parentesi`);
+      if (c.args.length < b.min) cerr(c.line, 'err.tooFewArgs', { name: c.name });
       if (c.name === 'scanf') c.args.slice(1).forEach(a => {
-        if (a.k === 'id') { const s = this.lookup(a.name); if (s && s.t && (s.t.k === 'int' || s.t.k === 'float')) cerr(c.line, `scanf ha bisogno dell'indirizzo della variabile: hai dimenticato la & davanti a ${a.name}? Scrivi  &${a.name}`); }
+        if (a.k === 'id') { const s = this.lookup(a.name); if (s && s.t && (s.t.k === 'int' || s.t.k === 'float')) cerr(c.line, 'err.scanfNeedsAddr', { name: a.name }); }
       });
     }
     if (!rec.resolved) this.calls.push(rec);
@@ -963,7 +969,7 @@ class Parser {
         let s = t.v; let big;
         if (/^0[xX]/.test(s)) big = BigInt(s);
         else if (/^0[0-7]+$/.test(s)) big = BigInt('0o' + s.slice(1));
-        else if (/^0\d+$/.test(s)) cerr(line, `Il numero ${s} non è valido: in C i numeri che iniziano con 0 sono in base 8 (ottale), e non possono contenere 8 o 9`);
+        else if (/^0\d+$/.test(s)) cerr(line, 'err.badOctal', { s });
         else big = BigInt(s);
         const u = t.suf.includes('u'), L = t.suf.includes('l');
         const fits32 = u ? big <= 0xffffffffn : big <= 0x7fffffffn;
@@ -982,7 +988,7 @@ class Parser {
       return node;
     }
     if (t.t === 'id') {
-      if (KEYWORDS.has(t.v) && t.v !== 'sizeof') cerr(line, `Qui non mi aspettavo la parola '${t.v}'.` + (TYPE_KW.has(t.v) ? ' Le dichiarazioni di variabili vanno all\'inizio dell\'istruzione.' : ''));
+      if (KEYWORDS.has(t.v) && t.v !== 'sizeof') cerr(line, 'err.unexpectedKeyword', { word: t.v, hint: TYPE_KW.has(t.v) ? ['hint.declAtStart'] : '' });
       if (t.v === '__func__' && this.curFunc) {
         const node = { k: 'str', bytes: [...enc.encode(this.curFunc.name)], line, idx: this.strings.length };
         this.strings.push(node); return node;
@@ -992,20 +998,20 @@ class Parser {
         if (s.kind === 'enum') return { k: 'num', t: TY.int, v: s.val, text: t.v, line };
         if (s.kind === 'var') return { k: 'id', name: t.v, line };
         if (s.kind === 'func') return { k: 'fid', name: t.v, line };
-        if (s.kind === 'typedef') cerr(line, `'${t.v}' è un tipo, non una variabile`);
+        if (s.kind === 'typedef') cerr(line, 'err.typeNotVar', { name: t.v });
       }
       if (this.isOp('(')) return { k: 'fid', name: t.v, line };
-      if (t.v === 'NULL') cerr(line, 'Per usare NULL devi includere <stdio.h> oppure <stdlib.h>');
-      if (t.v === 'true' || t.v === 'false' || t.v === 'bool') cerr(line, `Per usare ${t.v} devi scrivere #include <stdbool.h>`);
-      cerr(line, `La variabile '${t.v}' non è stata dichiarata. Prima di usarla devi scrivere il suo tipo, per esempio:  int ${t.v};${suggest(t.v, this.allNames())}`);
+      if (t.v === 'NULL') cerr(line, 'err.nullNeedsInclude');
+      if (t.v === 'true' || t.v === 'false' || t.v === 'bool') cerr(line, 'err.boolNeedsInclude', { name: t.v });
+      cerr(line, 'err.undeclaredVar', { name: t.v, suggest: suggest(t.v, this.allNames()) });
     }
     if (t.t === 'op' && t.v === '(') {
-      const e = this.parseExpr(); this.expectOp(')', 'per chiudere la parentesi');
+      const e = this.parseExpr(); this.expectOp(')', ['ctx.closeParen']);
       return { k: 'paren', e, line };
     }
-    if (t.t === 'eof') cerr(this.prev().line, 'Il programma finisce all\'improvviso: manca qualcosa alla fine (forse una parentesi graffa } ?)');
-    if (t.t === 'op' && t.v === '#') cerr(line, 'Le direttive come #include o #define devono stare all\'inizio di una riga');
-    cerr(line, `Qui mi aspettavo un valore o una variabile, ma ho trovato '${tokText(t)}'`);
+    if (t.t === 'eof') cerr(this.prev().line, 'err.unexpectedEndBrace');
+    if (t.t === 'op' && t.v === '#') cerr(line, 'err.directiveNotAtStart');
+    cerr(line, 'err.valueExpected', { found: found(t) });
   }
   constVal(e) {
     const self = this;
@@ -1055,31 +1061,31 @@ class Machine {
     this.globalEnv = { vars: new Map(), parent: null };
     this.frames = [];
   }
-  step(line) { if (++this.steps > this.maxSteps) throw new CError('limit', line, 'Il programma ci mette troppo tempo: probabilmente c\'è un ciclo infinito (un ciclo la cui condizione non diventa mai falsa).'); }
+  step(line) { if (++this.steps > this.maxSteps) throw new CError('limit', line, 'err.tooSlow'); }
   alignUp(v, a) { return Math.ceil(v / a) * a; }
-  allocData(size, align) { this.dataTop = this.alignUp(this.dataTop, align || 8); const a = this.dataTop; this.dataTop += Math.max(size, 1); if (this.dataTop > STACK_BASE) rerr(0, 'Memoria esaurita'); return a; }
+  allocData(size, align) { this.dataTop = this.alignUp(this.dataTop, align || 8); const a = this.dataTop; this.dataTop += Math.max(size, 1); if (this.dataTop > STACK_BASE) rerr(0, 'err.outOfMemory'); return a; }
   allocStack(size, align, line) {
     this.sp = this.alignUp(this.sp, align || 8); const a = this.sp; this.sp += Math.max(size, 1);
-    if (this.sp > STACK_END) rerr(line, 'Stack overflow: le variabili locali sono troppo grandi, oppure ci sono troppe chiamate di funzione una dentro l\'altra.');
+    if (this.sp > STACK_END) rerr(line, 'err.stackOverflow');
     this.init.fill(0, a, this.sp);
     return a;
   }
   // ---- accesso memoria ----
   check(addr, size, line, write) {
     if (!Number.isFinite(addr) || addr < DATA_BASE) {
-      if (addr === 0) rerr(line, 'Stai usando un puntatore NULL, che non punta a niente. Prima di usare *p (o p->...) il puntatore deve contenere l\'indirizzo di qualcosa.');
-      rerr(line, 'Stai usando un indirizzo di memoria non valido (forse un puntatore non inizializzato).');
+      if (addr === 0) rerr(line, 'err.nullPointer');
+      rerr(line, 'err.badAddressUninit');
     }
-    if (addr + size > MEM) rerr(line, 'Stai usando un indirizzo di memoria non valido.');
+    if (addr + size > MEM) rerr(line, 'err.badAddress');
     if (addr >= HEAP_BASE) {
       const b = this.findBlock(addr);
-      if (!b || addr + size > b.start + b.size) rerr(line, 'Stai uscendo dalla memoria allocata con malloc: il blocco è più piccolo di così.');
-      if (!b.live) rerr(line, 'Stai usando memoria che hai già liberato con free.');
+      if (!b || addr + size > b.start + b.size) rerr(line, 'err.heapOverflow');
+      if (!b.live) rerr(line, 'err.useAfterFree');
     } else if (addr >= STACK_BASE) {
-      if (addr >= this.sp) rerr(line, 'Stai usando la memoria di una variabile locale di una funzione che è già terminata. Non restituire l\'indirizzo di una variabile locale!');
+      if (addr >= this.sp) rerr(line, 'err.danglingStack');
     } else {
-      if (addr >= this.dataTop) rerr(line, 'Stai usando un indirizzo di memoria non valido.');
-      if (write && addr < this.roEnd) rerr(line, 'Non puoi modificare una stringa costante (scritta tra virgolette e assegnata a un puntatore). Usa un array:  char s[] = "...";');
+      if (addr >= this.dataTop) rerr(line, 'err.badAddress');
+      if (write && addr < this.roEnd) rerr(line, 'err.writeStringLiteral');
     }
   }
   findBlock(addr) {
@@ -1098,10 +1104,8 @@ class Machine {
   load(addr, t, line, what) {
     this.check(addr, t.size, line, false);
     if (!this.init[addr]) {
-      let desc;
-      if (addr >= HEAP_BASE) desc = `la memoria allocata con malloc (${what || ''}) non contiene ancora nessun valore: prima scrivici qualcosa`;
-      else desc = `stai usando '${what || this.varNameAt(addr) || '?'}' ma non contiene ancora nessun valore (non è inizializzata). Dagli un valore prima di usarla, per esempio  ${what && /^\w+$/.test(what) ? what : 'x'} = 0;`;
-      rerr(line, desc.charAt(0).toUpperCase() + desc.slice(1));
+      if (addr >= HEAP_BASE) rerr(line, 'err.uninitHeap', { what: what || '' });
+      rerr(line, 'err.uninitVar', { name: what || this.varNameAt(addr) || '?', example: what && /^\w+$/.test(what) ? what : 'x' });
     }
     const dv = this.dv;
     switch (t.k) {
@@ -1116,7 +1120,7 @@ class Machine {
       case 'float': return t.size === 4 ? dv.getFloat32(addr, true) : dv.getFloat64(addr, true);
       case 'ptr': return dv.getFloat64(addr, true);
     }
-    rerr(line, 'Non posso leggere un valore di tipo ' + tname(t));
+    rerr(line, 'err.cantRead', { type: tname(t) });
   }
   store(addr, t, v, line) {
     this.check(addr, t.size, line, true);
@@ -1132,26 +1136,26 @@ class Machine {
         break;
       case 'float': if (t.size === 4) dv.setFloat32(addr, v, true); else dv.setFloat64(addr, v, true); break;
       case 'ptr': dv.setFloat64(addr, v, true); break;
-      default: rerr(line, 'Non posso scrivere un valore di tipo ' + tname(t));
+      default: rerr(line, 'err.cantWrite', { type: tname(t) });
     }
     this.init.fill(1, addr, addr + t.size);
   }
   readBytes(addr, n, line) { this.check(addr, n, line, false); return { b: this.u8.slice(addr, addr + n), i: this.init.slice(addr, addr + n) }; }
   writeBytes(addr, bytes, line) { this.check(addr, bytes.b.length, line, true); this.u8.set(bytes.b, addr); this.init.set(bytes.i, addr); }
   cstr(addr, line, what) {
-    if (addr === 0) rerr(line, `${what || 'La stringa'}: il puntatore è NULL`);
+    if (addr === 0) rerr(line, 'err.stringNull', { what: what || ['frag.theString'] });
     const bytes = [];
     for (let a = addr; ; a++) {
       this.check(a, 1, line, false);
-      if (!this.init[a]) rerr(line, `${what || 'La stringa'} non finisce con il carattere '\\0' (oppure non è stata riempita). Ogni stringa in C deve terminare con '\\0'.`);
+      if (!this.init[a]) rerr(line, 'err.stringUnterminated', { what: what || ['frag.theString'] });
       const c = this.u8[a]; if (c === 0) break; bytes.push(c);
-      if (bytes.length > 1000000) rerr(line, 'Stringa troppo lunga');
+      if (bytes.length > 1000000) rerr(line, 'err.stringTooLong');
     }
     return bytes;
   }
   emit(bytes) {
     for (const b of bytes) this.out.push(b);
-    if (this.out.length > this.maxOut) throw new CError('limit', 0, 'Il programma ha stampato troppo testo (forse un ciclo infinito con printf dentro).');
+    if (this.out.length > this.maxOut) throw new CError('limit', 0, 'err.tooMuchOutput');
   }
 
   // ---- esecuzione ----
@@ -1184,15 +1188,15 @@ class Machine {
     return code;
   }
   callUser(fn, args, line) {
-    if (++this.depth > 900) rerr(line, `Troppe chiamate di funzione una dentro l'altra: probabilmente la ricorsione di '${fn.name}' non si ferma mai (manca il caso base?).`);
+    if (++this.depth > 900) rerr(line, 'err.recursionTooDeep', { name: fn.name });
     const saved = this.sp;
     const env = { vars: new Map(), parent: this.globalEnv };
     const ft = fn.t;
     for (let i = 0; i < ft.params.length; i++) {
       const pt = ft.params[i];
       const a = this.allocStack(pt.size, alignOf(pt), line);
-      if (i >= args.length) rerr(line, `Manca il parametro n. ${i + 1} di '${fn.name}'`);
-      this.assignTo(a, pt, args[i], line, `il valore n. ${i + 1} passato a '${fn.name}'`);
+      if (i >= args.length) rerr(line, 'err.missingParam', { n: i + 1, name: fn.name });
+      this.assignTo(a, pt, args[i], line, ['ctx.argN', { n: i + 1, name: fn.name }]);
       env.vars.set(ft.names[i], { t: pt, addr: a });
     }
     const frame = { name: fn.name, env, ret: undefined };
@@ -1202,7 +1206,7 @@ class Machine {
     this.sp = saved; this.depth--;
     if (r !== RET && ft.ret !== TY.void) {
       if (fn.name === 'main') return { t: TY.int, v: 0 };
-      rerr(fn.body.line, `La funzione '${fn.name}' è arrivata alla fine senza incontrare return: deve restituire un valore di tipo ${tname(ft.ret)}.`);
+      rerr(fn.body.line, 'err.noReturn', { name: fn.name, type: tname(ft.ret) });
     }
     if (ft.ret === TY.void) return { t: TY.void, v: 0 };
     return frame.ret;
@@ -1253,7 +1257,7 @@ class Machine {
       }
       case 'switch': {
         const v = this.evalR(s.e, env);
-        if (!isInt(v.t)) rerr(s.line, 'Lo switch funziona solo con valori interi o caratteri');
+        if (!isInt(v.t)) rerr(s.line, 'err.switchNotInt');
         let start = s.labels.has(v.v) ? s.labels.get(v.v) : s.def;
         if (start < 0) return NORMAL;
         const saved = this.sp; const senv = { vars: new Map(), parent: env };
@@ -1274,22 +1278,22 @@ class Machine {
         if (s.e) {
           const v = this.evalR(s.e, env);
           const rt = fn.t.ret;
-          f.ret = rt.k === 'struct' ? { t: rt, bytes: this.convert(v, rt, s.line, 'il valore restituito') } : { t: rt, v: this.convert(v, rt, s.line, 'il valore restituito') };
+          f.ret = rt.k === 'struct' ? { t: rt, bytes: this.convert(v, rt, s.line, CTX_RETURN) } : { t: rt, v: this.convert(v, rt, s.line, CTX_RETURN) };
         } else f.ret = { t: TY.int, v: 0 };
         return RET;
       }
     }
-    rerr(s.line, 'Istruzione non supportata: ' + s.k);
+    rerr(s.line, 'err.unsupportedStmt', { k: s.k });
   }
   declare(d, env) {
     let t = d.t;
     if (d.vla) {
       t = d.vla.base;
       const lens = d.vla.dims.map(e => {
-        if (!e) rerr(d.line, 'Manca la dimensione dell\'array');
-        const v = this.evalR(e, env); if (!isInt(v.t)) rerr(d.line, 'La dimensione di un array deve essere un numero intero');
-        if (v.v <= 0) rerr(d.line, `La dimensione dell'array '${d.name}' deve essere maggiore di zero, ma vale ${v.v}`);
-        if (v.v > 1000000) rerr(d.line, `L'array '${d.name}' è troppo grande (${v.v} elementi)`);
+        if (!e) rerr(d.line, 'err.arrayDimMissing');
+        const v = this.evalR(e, env); if (!isInt(v.t)) rerr(d.line, 'err.arrayDimNotInt');
+        if (v.v <= 0) rerr(d.line, 'err.arrayDimPositiveRt', { name: d.name, n: v.v });
+        if (v.v > 1000000) rerr(d.line, 'err.arrayTooBig', { name: d.name, n: v.v });
         return v.v;
       });
       for (let i = lens.length - 1; i >= 0; i--) t = arrT(t, lens[i]);
@@ -1310,28 +1314,28 @@ class Machine {
   initialize(addr, t, init, env, line) {
     if (t.k === 'arr') {
       if (init.k === 'str' && isInt(t.of) && t.of.size === 1) {
-        if (init.bytes.length > t.len) rerr(line, `La stringa "${new TextDecoder().decode(new Uint8Array(init.bytes))}" è troppo lunga per un array di ${t.len} caratteri (servono ${init.bytes.length + 1} posti, contando '\\0')`);
+        if (init.bytes.length > t.len) rerr(line, 'err.stringTooLongForArray', { s: new TextDecoder().decode(new Uint8Array(init.bytes)), len: t.len, need: init.bytes.length + 1 });
         this.u8.fill(0, addr, addr + t.size); this.u8.set(init.bytes, addr); this.init.fill(1, addr, addr + t.size); return;
       }
-      if (init.k !== 'initlist') rerr(line, 'Un array si inizializza con valori tra parentesi graffe, per esempio {1, 2, 3}');
+      if (init.k !== 'initlist') rerr(line, 'err.arrayInitList');
       this.u8.fill(0, addr, addr + t.size); this.init.fill(1, addr, addr + t.size);
-      if (init.items.length > t.len) rerr(line, `Hai messo ${init.items.length} valori, ma l'array ha solo ${t.len} posti`);
+      if (init.items.length > t.len) rerr(line, 'err.tooManyInitArray', { n: init.items.length, len: t.len });
       init.items.forEach((it, i) => this.initialize(addr + i * t.of.size, t.of, it, env, line));
       return;
     }
     if (t.k === 'struct') {
       if (init.k === 'initlist') {
         this.u8.fill(0, addr, addr + t.size); this.init.fill(1, addr, addr + t.size);
-        if (init.items.length > t.fields.length) rerr(line, `Hai messo ${init.items.length} valori, ma la struct ha solo ${t.fields.length} campi`);
+        if (init.items.length > t.fields.length) rerr(line, 'err.tooManyInitStruct', { n: init.items.length, len: t.fields.length });
         init.items.forEach((it, i) => this.initialize(addr + t.fields[i].off, t.fields[i].t, it, env, line));
         return;
       }
       const v = this.evalR(init, env);
-      this.writeBytes(addr, this.convert(v, t, line, 'il valore iniziale'), line); return;
+      this.writeBytes(addr, this.convert(v, t, line, CTX_INIT), line); return;
     }
-    if (init.k === 'initlist') { if (init.items.length !== 1) rerr(line, 'Una variabile semplice si inizializza con un solo valore'); init = init.items[0]; }
+    if (init.k === 'initlist') { if (init.items.length !== 1) rerr(line, 'err.scalarInitOne'); init = init.items[0]; }
     const v = this.evalR(init, env);
-    this.assignTo(addr, t, v, line, 'il valore iniziale');
+    this.assignTo(addr, t, v, line, CTX_INIT);
   }
   assignTo(addr, t, v, line, ctx) {
     if (t.k === 'struct') { this.writeBytes(addr, this.convert(v, t, line, ctx), line); return; }
@@ -1340,39 +1344,39 @@ class Machine {
   convert(v, t, line, ctx, explicit) {
     const f = v.t;
     if (t.k === 'struct') {
-      if (f !== t) rerr(line, `${ctx}: mi aspettavo una ${tname(t)}, ma è ${tname(f)}`);
+      if (f !== t) rerr(line, 'err.structMismatch', { ctx, want: tname(t), got: tname(f) });
       return v.bytes;
     }
-    if (f.k === 'struct') rerr(line, `${ctx}: non puoi usare una struct intera come se fosse un numero. Usa un suo campo con il punto, per esempio  s.x`);
-    if (f.k === 'void') rerr(line, `${ctx}: questa funzione è void e non restituisce nessun valore`);
+    if (f.k === 'struct') rerr(line, 'err.structAsNumber', { ctx });
+    if (f.k === 'void') rerr(line, 'err.voidValue', { ctx });
     if (t.k === 'int') {
       if (f.k === 'ptr' && !explicit) {
-        rerr(line, `${ctx}: stai mettendo un indirizzo (un puntatore${v.isStr ? ', cioè una stringa' : ''}) in una variabile di tipo ${tname(t)}.` + (v.isStr && t.size === 1 ? ' Un char contiene un solo carattere: usa gli apici singoli, per esempio \'a\'.' : v.isStr ? ' Per le stringhe usa un array di char.' : ''));
+        rerr(line, v.isStr ? 'err.stringToInt' : 'err.pointerToInt', { ctx, type: tname(t), hint: v.isStr ? [t.size === 1 ? 'hint.charSingleQuotes' : 'hint.useCharArray'] : '' });
       }
       if (t.isBool) return v.v ? 1 : 0;
       return wrap(v.v, t);
     }
     if (t.k === 'float') {
-      if (f.k === 'ptr') rerr(line, `${ctx}: non puoi mettere un indirizzo in una variabile ${tname(t)}`);
+      if (f.k === 'ptr') rerr(line, 'err.pointerToFloat', { ctx, type: tname(t) });
       return t.size === 4 ? Math.fround(v.v) : v.v;
     }
     if (t.k === 'ptr') {
       if (f.k === 'ptr') return v.v;
       if (isInt(f) && (v.v === 0 || explicit)) return v.v;
-      if (isInt(f)) rerr(line, `${ctx}: ci vuole un indirizzo (un puntatore di tipo ${tname(t)}), ma hai dato il numero ${v.v}. Forse hai dimenticato & davanti alla variabile?`);
-      rerr(line, `${ctx}: ci vuole un puntatore (${tname(t)}), non un ${tname(f)}`);
+      if (isInt(f)) rerr(line, 'err.intToPointer', { ctx, type: tname(t), n: v.v });
+      rerr(line, 'err.pointerNeeded', { ctx, type: tname(t), got: tname(f) });
     }
     if (t.k === 'void') return 0;
-    rerr(line, `${ctx}: conversione non possibile verso ${tname(t)}`);
+    rerr(line, 'err.badConversion', { ctx, type: tname(t) });
   }
   truth(v, line) {
-    if (v.t.k === 'struct') rerr(line, 'Una struct intera non può essere usata come condizione');
-    if (v.t.k === 'void') rerr(line, 'Questa funzione è void: non puoi usarla in una condizione');
+    if (v.t.k === 'struct') rerr(line, 'err.structAsCondition');
+    if (v.t.k === 'void') rerr(line, 'err.voidAsCondition');
     return v.v !== 0;
   }
   lookupVar(name, env, line) {
     for (let e = env; e; e = e.parent) { const v = e.vars.get(name); if (v) return v; }
-    rerr(line, `La variabile '${name}' non esiste qui`);
+    rerr(line, 'err.varNotHere', { name });
   }
   rvalOf(lv, line) {
     const t = lv.t;
@@ -1387,40 +1391,40 @@ class Machine {
       case 'un': {
         if (n.op !== '*') break;
         const p = this.evalR(n.e, env);
-        if (p.t.k !== 'ptr') rerr(n.line, `L'operatore * (valore puntato) si usa solo con i puntatori, ma '${exprText(n.e)}' è di tipo ${tname(p.t)}`);
-        if (p.t.to.k === 'void') rerr(n.line, 'Non puoi usare * su un puntatore void *: prima fai un cast, per esempio *(int *)p');
-        if (p.v === 0) rerr(n.line, `Il puntatore '${exprText(n.e)}' è NULL (non punta a niente): non puoi usare *${exprText(n.e)}`);
+        if (p.t.k !== 'ptr') rerr(n.line, 'err.derefNonPointer', { expr: exprText(n.e), type: tname(p.t) });
+        if (p.t.to.k === 'void') rerr(n.line, 'err.derefVoid');
+        if (p.v === 0) rerr(n.line, 'err.derefNull', { expr: exprText(n.e) });
         return { t: p.t.to, addr: p.v, name: '*' + exprText(n.e) };
       }
       case 'idx': {
         let b = this.evalR(n.a, env), i = this.evalR(n.i, env);
         if (isInt(b.t) && isPtr(i.t)) { const x = b; b = i; i = x; }
-        if (!isPtr(b.t)) rerr(n.line, `Le parentesi quadre [ ] si usano con array e puntatori, ma '${exprText(n.a)}' è di tipo ${tname(b.t)}`);
-        if (!isInt(i.t)) rerr(n.line, `L'indice tra [ ] deve essere un numero intero, ma '${exprText(n.i)}' è di tipo ${tname(i.t)}`);
+        if (!isPtr(b.t)) rerr(n.line, 'err.indexNonArray', { expr: exprText(n.a), type: tname(b.t) });
+        if (!isInt(i.t)) rerr(n.line, 'err.indexNotInt', { expr: exprText(n.i), type: tname(i.t) });
         const idx = i.v;
         if (b.arrLen != null && (idx < 0 || idx >= b.arrLen)) {
-          rerr(n.line, `Indice fuori dai limiti: stai usando ${b.arrName || exprText(n.a)}[${idx}], ma l'array ha ${b.arrLen} elementi, quindi gli indici validi vanno da 0 a ${b.arrLen - 1}.`);
+          rerr(n.line, 'err.indexOutOfBounds', { name: b.arrName || exprText(n.a), idx, len: b.arrLen, max: b.arrLen - 1 });
         }
-        if (b.v === 0) rerr(n.line, `Il puntatore '${exprText(n.a)}' è NULL (non punta a niente)`);
-        const et = b.t.to; if (et.k === 'void') rerr(n.line, 'Non puoi usare [ ] su un void *');
+        if (b.v === 0) rerr(n.line, 'err.indexNull', { expr: exprText(n.a) });
+        const et = b.t.to; if (et.k === 'void') rerr(n.line, 'err.indexVoid');
         return { t: et, addr: b.v + idx * et.size, name: exprText(n.a) + '[' + idx + ']' };
       }
       case 'mem': {
         let st, base;
         if (n.arrow) {
           const p = this.evalR(n.e, env);
-          if (p.t.k === 'struct') rerr(n.line, `'${exprText(n.e)}' è una struct, non un puntatore: usa il punto (${exprText(n.e)}.${n.name}) invece di ->`);
-          if (p.t.k !== 'ptr' || p.t.to.k !== 'struct') rerr(n.line, `-> si usa con i puntatori a struct, ma '${exprText(n.e)}' è di tipo ${tname(p.t)}`);
-          if (p.v === 0) rerr(n.line, `Il puntatore '${exprText(n.e)}' è NULL: non puoi usare ${exprText(n.e)}->${n.name}`);
+          if (p.t.k === 'struct') rerr(n.line, 'err.dotNotArrow', { expr: exprText(n.e), field: n.name });
+          if (p.t.k !== 'ptr' || p.t.to.k !== 'struct') rerr(n.line, 'err.arrowNonPointer', { expr: exprText(n.e), type: tname(p.t) });
+          if (p.v === 0) rerr(n.line, 'err.arrowNull', { expr: exprText(n.e), field: n.name });
           st = p.t.to; base = p.v;
         } else {
           const lv = this.evalL(n.e, env);
-          if (lv.t.k === 'ptr' && lv.t.to.k === 'struct') rerr(n.line, `'${exprText(n.e)}' è un puntatore a struct: usa -> (${exprText(n.e)}->${n.name}) invece del punto`);
-          if (lv.t.k !== 'struct') rerr(n.line, `Il punto . si usa con le struct, ma '${exprText(n.e)}' è di tipo ${tname(lv.t)}`);
+          if (lv.t.k === 'ptr' && lv.t.to.k === 'struct') rerr(n.line, 'err.arrowNotDot', { expr: exprText(n.e), field: n.name });
+          if (lv.t.k !== 'struct') rerr(n.line, 'err.dotNonStruct', { expr: exprText(n.e), type: tname(lv.t) });
           st = lv.t; base = lv.addr;
         }
         const f = st.fields.find(x => x.name === n.name);
-        if (!f) rerr(n.line, `La ${tname(st)} non ha un campo chiamato '${n.name}'. I campi sono: ${st.fields.map(x => x.name).join(', ')}.${suggest(n.name, st.fields.map(x => x.name))}`);
+        if (!f) rerr(n.line, 'err.noSuchField', { type: tname(st), name: n.name, fields: st.fields.map(x => x.name).join(', '), suggest: suggest(n.name, st.fields.map(x => x.name)) });
         return { t: f.t, addr: base + f.off, name: exprText(n) };
       }
       case 'call': {
@@ -1429,7 +1433,7 @@ class Machine {
         break;
       }
     }
-    rerr(n.line, `'${exprText(n)}' non è una variabile`);
+    rerr(n.line, 'err.notAVariable', { expr: exprText(n) });
   }
   evalR(n, env) {
     switch (n.k) {
@@ -1441,22 +1445,22 @@ class Machine {
         if (n.op === '*') return this.rvalOf(this.evalL(n, env), n.line);
         if (n.op === '&') { const lv = this.evalL(n.e, env); return { t: ptrT(lv.t), v: lv.addr }; }
         const v = this.evalR(n.e, env);
-        if (n.op === '!') { if (v.t.k === 'struct') rerr(n.line, '! non si usa con le struct'); return { t: TY.int, v: v.v === 0 ? 1 : 0 }; }
-        if (!isArith(v.t)) rerr(n.line, `L'operatore ${n.op} si usa con i numeri, non con ${tname(v.t)}`);
+        if (n.op === '!') { if (v.t.k === 'struct') rerr(n.line, 'err.notOnStruct'); return { t: TY.int, v: v.v === 0 ? 1 : 0 }; }
+        if (!isArith(v.t)) rerr(n.line, 'err.unaryNeedsNumber', { op: n.op, type: tname(v.t) });
         const t = promote(v.t);
         if (n.op === '+') return { t, v: v.v };
         if (n.op === '-') return { t, v: isFloat(t) ? -v.v : wrap(-v.v, t) };
-        if (n.op === '~') { if (!isInt(t)) rerr(n.line, '~ si usa solo con i numeri interi'); return { t, v: t.size === 8 ? wrap(~BigInt(v.v), t) : wrap(~v.v, t) }; }
+        if (n.op === '~') { if (!isInt(t)) rerr(n.line, 'err.tildeNeedsInt'); return { t, v: t.size === 8 ? wrap(~BigInt(v.v), t) : wrap(~v.v, t) }; }
         break;
       }
       case 'pre': case 'post': {
         const lv = this.evalL(n.e, env);
-        if (lv.t.k === 'arr') rerr(n.line, `Non puoi usare ${n.op} su un array intero ('${exprText(n.e)}')`);
+        if (lv.t.k === 'arr') rerr(n.line, 'err.incOnArray', { op: n.op, expr: exprText(n.e) });
         const cur = this.rvalOf(lv, n.line);
         let nv;
         if (isPtr(lv.t)) nv = cur.v + (n.op === '++' ? 1 : -1) * (lv.t.to.k === 'void' ? 1 : lv.t.to.size);
         else if (isArith(lv.t)) nv = this.convert({ t: lv.t, v: cur.v + (n.op === '++' ? 1 : -1) }, lv.t, n.line, n.op);
-        else rerr(n.line, `${n.op} non si può usare con ${tname(lv.t)}`);
+        else rerr(n.line, 'err.incBadType', { op: n.op, type: tname(lv.t) });
         this.store(lv.addr, lv.t, nv, n.line);
         return n.k === 'pre' ? { t: lv.t, v: nv } : cur;
       }
@@ -1464,13 +1468,13 @@ class Machine {
         const lv = this.evalL(n.l, env);
         if (lv.t.k === 'arr') {
           const isS = n.r.k === 'str';
-          rerr(n.line, `Non puoi assegnare un valore a tutto l'array '${exprText(n.l)}' con =. ` + (isS ? 'Per copiare una stringa in un array usa strcpy (con #include <string.h>): strcpy(' + exprText(n.l) + ', "...");' : 'Devi assegnare un elemento alla volta, per esempio con un ciclo for.'));
+          rerr(n.line, isS ? 'err.assignArrayString' : 'err.assignArray', { expr: exprText(n.l) });
         }
         let v;
         if (n.op === '=') v = this.evalR(n.r, env);
         else { const cur = this.rvalOf(lv, n.line); v = this.binop(n.op.slice(0, -1), cur, this.evalR(n.r, env), n.line, n); }
         if (lv.t.k === 'struct') { this.writeBytes(lv.addr, this.convert(v, lv.t, n.line, 'Nell\'assegnamento'), n.line); return v; }
-        const cv = this.convert(v, lv.t, n.line, `Nell'assegnamento a '${exprText(n.l)}'`);
+        const cv = this.convert(v, lv.t, n.line, ['ctx.assignTo', { expr: exprText(n.l) }]);
         this.store(lv.addr, lv.t, cv, n.line);
         return { t: lv.t, v: cv };
       }
@@ -1488,15 +1492,15 @@ class Machine {
       case 'cast': {
         const v = this.evalR(n.e, env);
         if (n.t.k === 'void') return { t: TY.void, v: 0 };
-        if (n.t.k === 'struct' || n.t.k === 'arr') rerr(n.line, 'Non puoi fare un cast verso ' + tname(n.t));
-        if (isFloat(v.t) && isPtr(n.t)) rerr(n.line, 'Non puoi convertire un numero con la virgola in un puntatore');
+        if (n.t.k === 'struct' || n.t.k === 'arr') rerr(n.line, 'err.badCast', { type: tname(n.t) });
+        if (isFloat(v.t) && isPtr(n.t)) rerr(n.line, 'err.floatToPointer');
         return { t: n.t, v: this.convert(v, n.t, n.line, 'Nel cast', true) };
       }
       case 'sizeofT': return { t: TY.ulong, v: n.t.size };
       case 'sizeofE': return { t: TY.ulong, v: this.typeOf(n.e, env).size };
       case 'call': return this.call(n, env);
     }
-    rerr(n.line, 'Espressione non supportata');
+    rerr(n.line, 'err.unsupportedExpr');
   }
   typeOf(n, env) {
     switch (n.k) {
@@ -1535,24 +1539,24 @@ class Machine {
   }
   binop(op, a, b, line, node) {
     const ctx = node ? exprText(node) : op;
-    if (a.t.k === 'struct' || b.t.k === 'struct') rerr(line, `Non puoi usare l'operatore ${op} con una struct intera ('${ctx}'). Usa i suoi campi.`);
-    if (a.t.k === 'void' || b.t.k === 'void') rerr(line, `In '${ctx}' c'è una funzione void, che non restituisce nessun valore`);
+    if (a.t.k === 'struct' || b.t.k === 'struct') rerr(line, 'err.opOnStruct', { op, expr: ctx });
+    if (a.t.k === 'void' || b.t.k === 'void') rerr(line, 'err.voidInExpr', { expr: ctx });
     const pa = isPtr(a.t), pb = isPtr(b.t);
     if (pa || pb) {
       if (['==', '!=', '<', '>', '<=', '>='].includes(op)) {
-        if ((a.isStr || b.isStr) && (op === '==' || op === '!=')) rerr(line, `Le stringhe non si confrontano con ${op}: così confronti gli indirizzi. Usa strcmp (con #include <string.h>): strcmp(a, b) == 0 vuol dire "uguali".`);
-        if ((pa && !pb && b.v !== 0) || (pb && !pa && a.v !== 0)) rerr(line, `In '${ctx}' stai confrontando un puntatore con un numero`);
+        if ((a.isStr || b.isStr) && (op === '==' || op === '!=')) rerr(line, 'err.compareStrings', { op });
+        if ((pa && !pb && b.v !== 0) || (pb && !pa && a.v !== 0)) rerr(line, 'err.comparePtrInt', { expr: ctx });
         return { t: TY.int, v: this.cmp(op, a.v, b.v) ? 1 : 0 };
       }
       if (op === '+' && pa && isInt(b.t)) return this.ptrAdd(a, b.v, line);
       if (op === '+' && pb && isInt(a.t)) return this.ptrAdd(b, a.v, line);
       if (op === '-' && pa && isInt(b.t)) return this.ptrAdd(a, -b.v, line);
       if (op === '-' && pa && pb) { const s = a.t.to.k === 'void' ? 1 : a.t.to.size; return { t: TY.long, v: Math.trunc((a.v - b.v) / s) }; }
-      rerr(line, `L'operazione '${ctx}' non si può fare con i puntatori`);
+      rerr(line, 'err.ptrArith', { expr: ctx });
     }
-    if (!isArith(a.t) || !isArith(b.t)) rerr(line, `L'operazione '${ctx}' non è valida`);
+    if (!isArith(a.t) || !isArith(b.t)) rerr(line, 'err.invalidOp', { expr: ctx });
     if (op === '<<' || op === '>>') {
-      if (!isInt(a.t) || !isInt(b.t)) rerr(line, `${op} si usa solo con numeri interi`);
+      if (!isInt(a.t) || !isInt(b.t)) rerr(line, 'err.opNeedsInt', { op });
       const t = promote(a.t);
       if (t.size === 8) { const x = BigInt(a.v), s = BigInt(b.v & 63); return { t, v: wrap(op === '<<' ? x << s : x >> s, t) }; }
       const s = b.v & 31;
@@ -1566,12 +1570,12 @@ class Machine {
       let r;
       switch (op) {
         case '+': r = x + y; break; case '-': r = x - y; break; case '*': r = x * y; break; case '/': r = x / y; break;
-        case '%': rerr(line, `L'operatore % (resto) funziona solo con i numeri interi, non con ${tname(t)}`);
-        default: rerr(line, `L'operatore ${op} funziona solo con i numeri interi`);
+        case '%': rerr(line, 'err.modNeedsInt', { type: tname(t) });
+        default: rerr(line, 'err.opNeedsIntOnly', { op });
       }
       return { t, v: t.size === 4 ? Math.fround(r) : r };
     }
-    if ((op === '/' || op === '%') && y === 0) rerr(line, `Divisione per zero in '${ctx}': non si può dividere per 0!`);
+    if ((op === '/' || op === '%') && y === 0) rerr(line, 'err.divByZero', { expr: ctx });
     if (t.size === 8) {
       const X = BigInt(x), Y = BigInt(y); let r;
       switch (op) {
@@ -1599,7 +1603,7 @@ class Machine {
     const args = n.args.map(a => this.evalR(a, env));
     const fn = this.prog.funcs.get(n.name);
     if (fn && !n.builtin) return this.callUser(fn, args, n.line);
-    if (!n.builtin && this.prog.funcTypes.has(n.name)) rerr(n.line, `La funzione '${n.name}' ha il prototipo ma manca il corpo { ... }`);
+    if (!n.builtin && this.prog.funcTypes.has(n.name)) rerr(n.line, 'err.protoNoBody', { name: n.name });
     return this.builtin(n.name, args, n, env);
   }
 
@@ -1608,11 +1612,11 @@ class Machine {
     const line = n.line;
     const I = (v) => ({ t: TY.int, v });
     const D = (v) => ({ t: TY.double, v });
-    const num = (i) => { const a = args[i]; if (!isArith(a.t)) rerr(line, `${name}: il valore n. ${i + 1} deve essere un numero, non ${tname(a.t)}`); return a.v; };
-    const ptr = (i, what) => { const a = args[i]; if (!isPtr(a.t)) rerr(line, `${name}: il valore n. ${i + 1} deve essere ${what || 'un puntatore'}, ma è di tipo ${tname(a.t)}`); return a.v; };
-    const strArg = (i) => { const p = ptr(i, 'una stringa (char *)'); return this.cstr(p, line, `${name}: la stringa n. ${i + 1}`); };
+    const num = (i) => { const a = args[i]; if (!isArith(a.t)) rerr(line, 'err.argNotNumber', { name, n: i + 1, type: tname(a.t) }); return a.v; };
+    const ptr = (i, what) => { const a = args[i]; if (!isPtr(a.t)) rerr(line, 'err.argNotPointer', { name, n: i + 1, want: [what || 'frag.aPointer'], type: tname(a.t) }); return a.v; };
+    const strArg = (i) => { const p = ptr(i, 'frag.aString'); return this.cstr(p, line, ['ctx.stringArg', { name, n: i + 1 }]); };
     const writeStr = (addr, bytes, line2, cap) => {
-      if (cap != null && bytes.length + 1 > cap) rerr(line2, `${name}: la stringa (${bytes.length} caratteri + '\\0') non entra nell'array di destinazione, che ha solo ${cap} posti`);
+      if (cap != null && bytes.length + 1 > cap) rerr(line2, 'err.stringDoesNotFit', { name, len: bytes.length, cap });
       this.check(addr, bytes.length + 1, line2, true);
       this.u8.set(bytes, addr); this.u8[addr + bytes.length] = 0; this.init.fill(1, addr, addr + bytes.length + 1);
     };
@@ -1646,8 +1650,8 @@ class Machine {
       case 'memcpy': { const d = ptr(0), s = ptr(1), k = num(2); const b = this.readBytes(s, k, line); this.writeBytes(d, b, line); return args[0]; }
       case 'malloc': case 'calloc': {
         const size = name === 'malloc' ? num(0) : num(0) * num(1);
-        if (size < 0) rerr(line, `${name}: la dimensione non può essere negativa`);
-        if (size > 1 << 20) rerr(line, `${name}: stai chiedendo troppa memoria (${size} byte)`);
+        if (size < 0) rerr(line, 'err.negativeSize', { name });
+        if (size > 1 << 20) rerr(line, 'err.tooMuchMemory', { name, size });
         const a = this.alignUp(this.heapTop, 16);
         if (a + size > MEM) return { t: ptrT(TY.void), v: 0 };
         this.heapTop = a + Math.max(size, 1);
@@ -1660,7 +1664,7 @@ class Machine {
         const a = this.alignUp(this.heapTop, 16); this.heapTop = a + Math.max(size, 1);
         this.heap.push({ start: a, size, live: true, line }); this.init.fill(0, a, a + size);
         if (old) {
-          const b = this.findBlock(old); if (!b || b.start !== old || !b.live) rerr(line, 'realloc: il puntatore non viene da malloc');
+          const b = this.findBlock(old); if (!b || b.start !== old || !b.live) rerr(line, 'err.reallocBadPtr');
           const k = Math.min(b.size, size); this.u8.copyWithin(a, old, old + k); this.init.copyWithin(a, old, old + k); b.live = false;
         }
         return { t: ptrT(TY.void), v: a };
@@ -1668,8 +1672,8 @@ class Machine {
       case 'free': {
         const p = ptr(0); if (p === 0) return { t: TY.void, v: 0 };
         const b = p >= HEAP_BASE ? this.findBlock(p) : null;
-        if (!b || b.start !== p) rerr(line, 'free si può usare solo con un puntatore restituito da malloc (non con variabili normali o array)');
-        if (!b.live) rerr(line, 'Stai facendo free due volte sulla stessa memoria');
+        if (!b || b.start !== p) rerr(line, 'err.freeBadPtr');
+        if (!b.live) rerr(line, 'err.doubleFree');
         b.live = false; return { t: TY.void, v: 0 };
       }
       case 'abs': return I(Math.abs(num(0)) | 0);
@@ -1695,7 +1699,7 @@ class Machine {
       case 'isalnum': { const c = num(0); return I((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ? 1 : 0); }
       case 'isspace': { const c = num(0); return I(c === 32 || (c >= 9 && c <= 13) ? 1 : 0); }
     }
-    rerr(line, `La funzione ${name} non è disponibile`);
+    rerr(line, 'err.funcUnavailable', { name });
   }
   format(fmt, args, ai, line) {
     const out = []; const push = (s) => { for (const b of enc.encode(s)) out.push(b); };
@@ -1705,14 +1709,14 @@ class Machine {
       if (c !== 37) { out.push(c); i++; continue; }
       const rest = String.fromCharCode(...fmt.slice(i, i + 30));
       const m = /^%([-+ 0#]*)(\*|\d+)?(?:\.(\*|\d*))?(hh|h|ll|l|z|L)?([diuxXocsfFeEgGp%])/.exec(rest);
-      if (!m) rerr(line, `printf: il segnaposto '${rest.slice(0, 3)}' non esiste. I più usati sono %d (interi), %f (decimali), %c (caratteri), %s (stringhe)`);
+      if (!m) rerr(line, 'err.printfBadSpec', { spec: rest.slice(0, 3) });
       i += m[0].length;
       const flags = m[1];
       let width = m[2], prec = m[3];
       const len = m[4] || '', conv = m[5];
       if (conv === '%') { out.push(37); continue; }
       const nextArg = (what) => {
-        if (ai >= args.length) rerr(line, `printf: il segnaposto %${conv} non ha un valore corrispondente. Ogni segnaposto (%d, %f, ...) ha bisogno di un valore dopo la virgola, in ordine.`);
+        if (ai >= args.length) rerr(line, 'err.printfMissingArg', { conv });
         return args[ai++];
       };
       if (width === '*') width = String(nextArg().v);
@@ -1730,13 +1734,11 @@ class Machine {
         }
         return ' '.repeat(w - s.length) + s;
       };
-      const typeErr = (want) => rerr(line, `printf: il segnaposto %${len}${conv} vuole ${want}, ma il valore n. ${ai - 1} è di tipo ${tname(a.t)}.` +
-        (want.includes('intero') && isFloat(a.t) ? ' Per i numeri con la virgola usa %f.' : '') +
-        (want.includes('virgola') && isInt(a.t) ? ' Per gli interi usa %d.' : '') +
-        (want.includes('stringa') && isInt(a.t) ? ' Per un singolo carattere usa %c.' : ''));
+      const typeErr = (want) => rerr(line, 'err.printfType', { spec: '%' + len + conv, want: [want], n: ai - 1, type: tname(a.t),
+        hint: want === 'frag.anInt' && isFloat(a.t) ? ['hint.useF'] : want === 'frag.aFloat' && isInt(a.t) ? ['hint.useD'] : want === 'frag.aString' && isInt(a.t) ? ['hint.useC'] : '' });
       switch (conv) {
         case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
-          if (!isInt(a.t)) typeErr('un numero intero');
+          if (!isInt(a.t)) typeErr('frag.anInt');
           let t = (len === 'l' || len === 'll' || len === 'z') ? TY.long : TY.int;
           if (len === 'h') t = TY.short; if (len === 'hh') t = TY.char;
           let v = a.v;
@@ -1752,10 +1754,10 @@ class Machine {
           if (flags.includes('#') && v !== 0) { if (conv === 'x') digits = '0x' + digits; if (conv === 'X') digits = '0X' + digits; if (conv === 'o') digits = '0' + digits; }
           s = pad(sign + digits, true); break;
         }
-        case 'c': if (!isInt(a.t)) typeErr('un carattere (char)'); s = null; { const w = width ? parseInt(width, 10) : 0; const pads = Math.max(0, w - 1); if (!flags.includes('-')) for (let k = 0; k < pads; k++) out.push(32); out.push(a.v & 255); if (flags.includes('-')) for (let k = 0; k < pads; k++) out.push(32); } break;
+        case 'c': if (!isInt(a.t)) typeErr('frag.aChar'); s = null; { const w = width ? parseInt(width, 10) : 0; const pads = Math.max(0, w - 1); if (!flags.includes('-')) for (let k = 0; k < pads; k++) out.push(32); out.push(a.v & 255); if (flags.includes('-')) for (let k = 0; k < pads; k++) out.push(32); } break;
         case 's': {
-          if (!isPtr(a.t)) typeErr('una stringa (char *)');
-          let bytes = a.v === 0 ? [...enc.encode('(null)')] : this.cstr(a.v, line, 'printf: la stringa');
+          if (!isPtr(a.t)) typeErr('frag.aString');
+          let bytes = a.v === 0 ? [...enc.encode('(null)')] : this.cstr(a.v, line, CTX_PRINTF_STRING);
           if (prec !== undefined) bytes = bytes.slice(0, parseInt(prec || '0', 10));
           const w = width ? parseInt(width, 10) : 0; const n = new TextDecoder().decode(new Uint8Array(bytes)).length; const pads = Math.max(0, w - n);
           if (!flags.includes('-')) for (let k = 0; k < pads; k++) out.push(32);
@@ -1764,7 +1766,7 @@ class Machine {
           s = null; break;
         }
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
-          if (!isFloat(a.t)) typeErr('un numero con la virgola (float o double)');
+          if (!isFloat(a.t)) typeErr('frag.aFloat');
           const v = a.v; const p = prec === undefined ? 6 : parseInt(prec || '0', 10);
           let body;
           if (!Number.isFinite(v)) body = Number.isNaN(v) ? 'nan' : 'inf';
@@ -1776,14 +1778,14 @@ class Machine {
           const sign = neg ? '-' : (flags.includes('+') ? '+' : (flags.includes(' ') ? ' ' : ''));
           s = pad(sign + body, Number.isFinite(v)); break;
         }
-        case 'p': if (!isPtr(a.t)) typeErr('un puntatore'); s = pad(a.v === 0 ? '(nil)' : '0x' + (0x7ffc00000000 + a.v).toString(16), false); break;
+        case 'p': if (!isPtr(a.t)) typeErr('frag.aPointer'); s = pad(a.v === 0 ? '(nil)' : '0x' + (0x7ffc00000000 + a.v).toString(16), false); break;
       }
       if (s !== null && s !== undefined) push(s);
     }
     return out;
   }
   scanf(args, line) {
-    const fmt = this.cstr(args[0].v, line, 'scanf: il formato');
+    const fmt = this.cstr(args[0].v, line, CTX_SCANF_FORMAT);
     let ai = 1, count = 0, i = 0;
     const inp = this.input;
     const skipWs = () => { while (this.inPos < inp.length && (inp[this.inPos] === 32 || (inp[this.inPos] >= 9 && inp[this.inPos] <= 13))) this.inPos++; };
@@ -1793,15 +1795,15 @@ class Machine {
       if (c !== 37) { if (this.inPos < inp.length && inp[this.inPos] === c) { this.inPos++; i++; continue; } return count; }
       const rest = String.fromCharCode(...fmt.slice(i, i + 12));
       const m = /^%(\*)?(\d+)?(hh|h|ll|l|L)?([diufFeEgGcsx%])/.exec(rest);
-      if (!m) rerr(line, `scanf: il segnaposto '${rest.slice(0, 3)}' non è valido`);
+      if (!m) rerr(line, 'err.scanfBadSpec', { spec: rest.slice(0, 3) });
       i += m[0].length;
       const conv = m[4], len = m[3] || '', width = m[2] ? parseInt(m[2], 10) : Infinity, skip = !!m[1];
       if (conv === '%') { skipWs(); if (inp[this.inPos] === 37) { this.inPos++; continue; } return count; }
       let target = null;
       if (!skip) {
-        if (ai >= args.length) rerr(line, `scanf: il segnaposto %${conv} non ha una variabile corrispondente`);
+        if (ai >= args.length) rerr(line, 'err.scanfMissingArg', { conv });
         target = args[ai++];
-        if (!isPtr(target.t)) rerr(line, `scanf ha bisogno dell'indirizzo della variabile: hai dimenticato la & ? Scrivi per esempio  scanf("%${len}${conv}", &x);`);
+        if (!isPtr(target.t)) rerr(line, 'err.scanfNeedsAddrGeneric', { spec: '%' + len + conv });
       }
       const want = (conv === 'd' || conv === 'i' || conv === 'u' || conv === 'x') ? (len === 'l' || len === 'll' ? 'long' : len === 'h' ? 'short' : 'int')
         : (conv === 'c' || conv === 's') ? 'char' : (len === 'l' || len === 'L' ? 'double' : 'float');
@@ -1812,11 +1814,11 @@ class Machine {
             (to.k === 'int' && to.size === ({ int: 4, long: 8, short: 2 })[want]);
         if (!ok) {
           let hint = '';
-          if (to === TY.double) hint = ' Per le variabili double si usa %lf.';
-          else if (to === TY.float) hint = ' Per le variabili float si usa %f.';
-          else if (to.k === 'int' && to.size === 4) hint = ' Per le variabili int si usa %d.';
-          else if (to.k === 'int' && to.size === 1) hint = ' Per un char si usa %c (o %s per le stringhe).';
-          rerr(line, `scanf: il segnaposto %${len}${conv} non va bene per una variabile di tipo ${tname(to)}.${hint}`);
+          if (to === TY.double) hint = ['hint.scanfDouble'];
+          else if (to === TY.float) hint = ['hint.scanfFloat'];
+          else if (to.k === 'int' && to.size === 4) hint = ['hint.scanfInt'];
+          else if (to.k === 'int' && to.size === 1) hint = ['hint.scanfChar'];
+          rerr(line, 'err.scanfType', { spec: '%' + len + conv, type: tname(to), hint });
         }
       }
       if (conv === 'c') {
@@ -1830,7 +1832,7 @@ class Machine {
         while (this.inPos < inp.length && bytes.length < width && !(inp[this.inPos] === 32 || (inp[this.inPos] >= 9 && inp[this.inPos] <= 13))) bytes.push(inp[this.inPos++]);
         if (target) {
           const capB = target.arrLen != null ? target.arrLen : null;
-          if (capB != null && bytes.length + 1 > capB) rerr(line, `scanf: la parola letta (${bytes.length} caratteri) non entra nell'array, che ha solo ${capB} posti (serve un posto anche per '\\0')`);
+          if (capB != null && bytes.length + 1 > capB) rerr(line, 'err.scanfWordTooLong', { len: bytes.length, cap: capB });
           this.check(target.v, bytes.length + 1, line, true);
           this.u8.set(bytes, target.v); this.u8[target.v + bytes.length] = 0; this.init.fill(1, target.v, target.v + bytes.length + 1);
         }
@@ -1893,9 +1895,9 @@ function run(src, opts) {
     res.ok = true;
     res.leaks = m.heap.filter(b => b.live).length;
   } catch (e) {
-    if (e instanceof CError) res.error = { kind: e.kind, line: e.line, message: e.message };
-    else if (e instanceof RangeError) res.error = { kind: 'runtime', line: 0, message: 'Troppe chiamate di funzione una dentro l\'altra (ricorsione infinita?)' };
-    else res.error = { kind: 'internal', line: 0, message: 'Errore interno dell\'interprete: ' + (e && e.message) };
+    if (e instanceof CError) res.error = { kind: e.kind, line: e.line, message: e.msg };
+    else if (e instanceof RangeError) res.error = { kind: 'runtime', line: 0, message: ['err.recursionTooDeepGeneric'] };
+    else res.error = { kind: 'internal', line: 0, message: ['err.internal', { detail: String(e && e.message) }] };
   }
   if (m) { res.output = new TextDecoder().decode(new Uint8Array(m.out)); res.steps = m.steps; }
   return res;

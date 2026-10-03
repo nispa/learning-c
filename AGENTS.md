@@ -18,8 +18,9 @@ src/i18n/en.js             testi dell'interfaccia in inglese: il riferimento per
 src/i18n/it.js             italiano
 src/core/checker.js        verifica un livello; riceve la funzione run del linguaggio, non produce frasi
 src/core/app.js            interfaccia; legge tutto dall'oggetto del linguaggio e i testi da t()
-src/languages/README.md    contratto di un linguaggio e formato dei livelli
-src/languages/c/           interprete, livelli e definizione del C
+src/languages/README.md    contratto di un linguaggio, formato dei livelli, come aggiungere una lingua
+src/languages/c/           interprete (senza testi) e definizione del C
+src/languages/c/locales/   per ogni lingua: strings.js (messaggi) e levels.js (livelli)
 tests/                     node:test
 ```
 
@@ -61,19 +62,24 @@ aggiunge quando arriva il secondo caso che lo usa.
 - Nessun testo per l'utente scritto nel codice: in `app.js` si usa `t('chiave', { segnaposto })`,
   in `index.html` gli attributi `data-i18n="chiave"` (testo) e `data-i18n-aria="chiave"` (aria-label).
 - Una chiave nuova si aggiunge **prima in `src/i18n/en.js`**, poi in tutte le altre lingue.
-- I testi che dipendono dal linguaggio (es. `scanf`, `malloc`) stanno in `i18n` dentro il suo
-  `language.js`, con le stesse regole.
+- I testi che dipendono dal linguaggio (es. `scanf`, `malloc`) e i messaggi dell'interprete stanno in
+  `src/languages/<id>/locales/<lingua>/strings.js`, con le stesse regole.
+- L'interprete non scrive frasi: lancia `cerr(line, 'err.chiave', { valori })`. Un valore può essere
+  `[chiave, valori]` (un pezzo di frase da tradurre); `t()` li traduce in modo ricorsivo.
+- I livelli sono tradotti per intero in `locales/<lingua>/levels.js` (anche codice e output attesi),
+  con gli stessi capitoli e id dell'inglese.
 - Plurali: il valore diventa `{ one: '...', other: '...' }` e si passa `{ n }` a `t()`.
-- Nuova lingua: copia `src/i18n/en.js` in `src/i18n/<codice>.js`, traduci ogni valore,
-  aggiungi il suo `<script>` in `index.html`. Compare da sola nelle impostazioni.
+- Nuova lingua: copia `src/i18n/en.js` in `src/i18n/<codice>.js` e `src/languages/<id>/locales/en/`
+  in `locales/<codice>/`, traduci ogni valore, aggiungi i `<script>` in `index.html`.
+  Compare da sola nelle impostazioni. Dettagli in `src/languages/README.md`.
 - Se manca una chiave nella lingua scelta, `t()` usa l'inglese; i test però vogliono ogni lingua completa.
-- Ancora solo in italiano: il contenuto dei livelli e i messaggi d'errore dell'interprete C.
 
 ## Qualità
 
 - `npm test` deve essere verde prima di considerare finito un cambiamento. Controlla:
-  - ogni livello: la `solution` lo supera, il `code` di partenza no;
-  - ogni lingua: stesse chiavi, segnaposto e plurali dell'inglese; ogni chiave usata esiste;
+  - ogni livello in ogni lingua: la `solution` lo supera, il `code` di partenza no;
+  - ogni lingua: stessi capitoli e id dei livelli, stesse chiavi, segnaposto e plurali dell'inglese;
+  - ogni chiave usata (interfaccia e interprete) esiste in ogni lingua, e nessuna è in più;
   - ogni file `.js` in `src/` è caricato da `index.html`.
 - Correggi un bug dell'interprete scrivendo prima un test in `tests/` che lo riproduce.
 - Commenti in italiano, brevi, che spiegano il perché, non il cosa.

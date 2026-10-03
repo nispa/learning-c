@@ -5,15 +5,12 @@
 const $ = (id) => document.getElementById(id);
 const LANGUAGES = window.LANGUAGES || {};
 const language = LANGUAGES[new URLSearchParams(location.search).get('language')] || Object.values(LANGUAGES)[0];
-const CHAPTERS = language.chapters;
 $('langName').textContent = language.name;
 $('fileName').textContent = language.fileName;
-const LEVELS = [];
-CHAPTERS.forEach((c, ci) => c.levels.forEach((l, li) => LEVELS.push(Object.assign(l, { chapter: c, ci, li }))));
 
 /* ---------- stato salvato ---------- */
 const KEY = language.storageKey;
-let state = { done: {}, code: {}, current: LEVELS[0].id, fs: 17, tutor: false };
+let state = { done: {}, code: {}, current: null, fs: 17, tutor: false };
 try { const s = JSON.parse(localStorage.getItem(KEY) || 'null'); if (s) state = Object.assign(state, s); } catch (e) {}
 function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
@@ -26,15 +23,27 @@ function pickLocale() {
   return wanted.map(l => l && l.toLowerCase().split('-')[0]).find(l => l && I18N[l]) || 'en';
 }
 let locale = pickLocale();
+
+/* ---------- livelli nella lingua scelta (gli id sono gli stessi in tutte le lingue) ---------- */
+let CHAPTERS = [], LEVELS = [];
+function loadLevels() {
+  CHAPTERS = language.chapters[locale] || language.chapters.en;
+  LEVELS = [];
+  CHAPTERS.forEach((c, ci) => c.levels.forEach((l, li) => LEVELS.push(Object.assign(l, { chapter: c, ci, li }))));
+}
+loadLevels();
 // Cerca prima nei testi del linguaggio, poi in quelli comuni; se una chiave manca nella lingua scelta usa l'inglese.
+// Un valore [chiave, valori] è a sua volta un testo da tradurre (così l'interprete compone i messaggi senza scriverli).
 function t(key, vars) {
   const own = language.i18n || {};
   let s = [own[locale], I18N[locale], own.en, I18N.en].map(d => d && d[key]).find(v => v !== undefined);
   if (s === undefined) return key;
   vars = vars || {};
   if (typeof s === 'object') s = s[new Intl.PluralRules(locale).select(vars.n)] || s.other;
-  return s.replace(/\{(\w+)\}/g, (m, k) => vars[k] !== undefined ? vars[k] : m);
+  return s.replace(/\{(\w+)\}/g, (m, k) => vars[k] === undefined ? m : Array.isArray(vars[k]) ? t(...vars[k]) : vars[k]).trim();
 }
+// I messaggi del linguaggio sono [chiave, valori]; un linguaggio può anche dare testo già pronto.
+const msgText = (m) => Array.isArray(m) ? t(...m) : String(m);
 function applyLocale() {
   document.documentElement.lang = locale;
   document.title = language.name + ' ' + t('app.name');
@@ -86,7 +95,7 @@ let saveTimer = null;
 function onEdit() {
   $('saved').textContent = t('editor.edited');
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { state.code[cur.id] = getCode(); save(); $('saved').textContent = t('editor.saved'); }, 400);
+  saveTimer = setTimeout(() => { keepCode(); $('saved').textContent = t('editor.saved'); }, 400);
 }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeOverlays(); $('nav').classList.remove('open'); } });
 
@@ -113,8 +122,15 @@ function renderNav() {
 }
 let cur = LEVELS.find(l => l.id === state.current) || LEVELS[0];
 let loaded = false;
+// Salva il codice solo se è diverso da quello di partenza: così, cambiando lingua, i livelli non toccati
+// mostrano il codice nella lingua nuova.
+function keepCode() {
+  const code = getCode();
+  if (code === cur.code) delete state.code[cur.id]; else state.code[cur.id] = code;
+  save();
+}
 function go(id) {
-  if (loaded) { state.code[cur.id] = getCode(); }
+  if (loaded) keepCode();
   loaded = true;
   cur = LEVELS.find(l => l.id === id) || LEVELS[0];
   state.current = cur.id; save();
@@ -148,11 +164,11 @@ function nextLevel() { const i = LEVELS.indexOf(cur); return LEVELS[i + 1] || nu
 const where = (line) => esc(line ? t('where', { file: language.fileName, line }) : language.fileName);
 function describeError(err) {
   const kind = t('error.' + (['compile', 'limit', 'internal'].includes(err.kind) ? err.kind : 'runtime'));
-  return `<div class="msg err"><h4>${esc(kind)}</h4><div class="where">${where(err.line)}</div><p>${md(err.message)}</p></div>`;
+  return `<div class="msg err"><h4>${esc(kind)}</h4><div class="where">${where(err.line)}</div><p>${md(msgText(err.message))}</p></div>`;
 }
 function run() {
   const code = getCode();
-  state.code[cur.id] = code; save(); $('saved').textContent = t('editor.saved');
+  keepCode(); $('saved').textContent = t('editor.saved');
   clearErr();
   const input = $('inputBox').hidden ? (cur.tests[0].input || '') : $('stdin').value;
   const r = language.run(code, { input });
@@ -163,7 +179,7 @@ function run() {
   $('console').innerHTML = html;
   let out = '';
   if (r.warnings && r.warnings.length) {
-    out += r.warnings.map(w => `<div class="msg warn"><h4>${esc(t('warning'))}</h4><div class="where">${where(w.line)}</div><p>${md(w.msg)}</p></div>`).join('');
+    out += r.warnings.map(w => `<div class="msg warn"><h4>${esc(t('warning'))}</h4><div class="where">${where(w.line)}</div><p>${md(msgText(w.msg))}</p></div>`).join('');
   }
   if (r.error) {
     markErr(r.error.line);
@@ -208,7 +224,7 @@ function verdictFail(res, shownInput) {
   else if (test.input) ctx = t('fail.withInput', { input: oneLine(test.input) });
   if (ctx) ctx = `<p>${md(ctx)}</p>`;
   if (f.kind === 'error') {
-    return `<div class="msg err"><h4>${esc(t('fail.error.title'))}</h4>${ctx}<div class="where">${where(f.error.line)}</div><p>${md(f.error.message)}</p>${chips(res)}</div>`;
+    return `<div class="msg err"><h4>${esc(t('fail.error.title'))}</h4>${ctx}<div class="where">${where(f.error.line)}</div><p>${md(msgText(f.error.message))}</p>${chips(res)}</div>`;
   }
   const exp = Checker.norm(test.expect).split('\n'), got = Checker.norm(f.got).split('\n');
   const n = Math.max(exp.length, got.length);
@@ -245,7 +261,7 @@ function closeOverlays() { $('confirm').hidden = true; $('settings').hidden = tr
 $('cfNo').onclick = closeOverlays;
 $('cfYes').onclick = () => { const a = cfAction; closeOverlays(); if (a) a(); };
 $('resetBtn').onclick = () => ask('confirm.reset', () => {
-  setCode(cur.code); state.code[cur.id] = cur.code; save(); $('verdict').innerHTML = ''; clearErr();
+  setCode(cur.code); delete state.code[cur.id]; save(); $('verdict').innerHTML = ''; clearErr();
 });
 $('solBtn').onclick = () => ask('confirm.solution', () => {
   setCode(cur.solution); state.code[cur.id] = cur.solution; save();
@@ -261,6 +277,9 @@ Object.keys(I18N).forEach(code => $('locale').add(new Option(I18N[code]['locale.
 $('locale').onchange = () => {
   locale = $('locale').value;
   try { localStorage.setItem(LOCALE_KEY, locale); } catch (e) {}
+  keepCode(); loadLevels();
+  cur = LEVELS.find(l => l.id === cur.id) || LEVELS[0];
+  loaded = false; // il codice nell'editor è ancora quello della lingua di prima: non va salvato di nuovo
   applyLocale(); go(cur.id);
 };
 function applyFont() { document.documentElement.style.setProperty('--fs', state.fs + 'px'); if (cm) cm.refresh(); }
