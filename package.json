@@ -1,0 +1,8 @@
+{
+  "name": "passo-passo",
+  "private": true,
+  "description": "Corso interattivo di programmazione nel browser, livello per livello.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passo Passo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="bar">
+  <button class="iconbtn" id="menuBtn" data-i18n-aria="menu.aria">☰ <span data-i18n="menu"></span></button>
+  <div class="brand"><b><span id="langName" class="lang"></span> <span data-i18n="app.name"></span></b><small class="muted"></small></div>
+  <div class="progress"><span id="progText">0 / 0</span><div class="pbar"><i id="progBar" style="width:0%"></i></div></div>
+  <button class="iconbtn" id="settingsBtn" data-i18n="settings"></button>
+</header>
+
+<div class="shell">
+  <nav class="nav" id="nav" data-i18n-aria="nav.aria"></nav>
+  <main class="main">
+    <section class="col" data-i18n-aria="task.aria">
+      <div>
+        <div class="eyebrow" id="eyebrow"></div>
+        <h1 id="title"></h1>
+      </div>
+      <div class="task" id="task"></div>
+      <div class="expected">
+        <p class="panel-label" data-i18n="expected"></p>
+        <div class="inp" id="expInput" hidden></div>
+        <pre id="expected"></pre>
+      </div>
+      <div class="row">
+        <button class="btn" id="hintBtn" data-i18n="hint"></button>
+        <button class="btn" id="solBtn" data-i18n="solution.show" hidden></button>
+      </div>
+      <div class="note hint" id="hint" hidden><b data-i18n="hint"></b><span></span></div>
+      <div class="note learn" id="learn" hidden><b data-i18n="learned"></b><span></span></div>
+    </section>
+
+    <section class="col" data-i18n-aria="program.aria">
+      <div class="editor-wrap">
+        <div class="editor-head"><span id="fileName"></span><span id="saved" data-i18n="editor.saved"></span></div>
+        <div id="editorHost"></div>
+      </div>
+      <div class="input-box" id="inputBox" hidden>
+        <label for="stdin" data-i18n="input.label"></label>
+        <textarea id="stdin" rows="2" spellcheck="false"></textarea>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="runBtn">▶ <span data-i18n="run"></span> <span class="kbd" data-i18n="run.shortcut"></span></button>
+        <button class="btn" id="resetBtn">↺ <span data-i18n="reset"></span></button>
+        <button class="btn next" id="nextBtn" hidden><span data-i18n="next"></span> →</button>
+      </div>
+      <div>
+        <p class="panel-label" data-i18n="output"></p>
+        <div class="console" id="console"></div>
+      </div>
+      <div id="verdict"></div>
+    </section>
+  </main>
+</div>
+
+<div class="overlay" id="settings" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <h2 id="setTitle" data-i18n="settings"></h2>
+    <div class="fontrow"><label for="locale" data-i18n="settings.locale"></label>
+      <select id="locale"></select>
+    </div>
+    <div class="fontrow"><span data-i18n="settings.fontSize"></span>
+      <button class="iconbtn" id="fontDown" data-i18n-aria="settings.fontDown">A−</button>
+      <button class="iconbtn" id="fontUp" data-i18n-aria="settings.fontUp">A+</button>
+    </div>
+    <label><input type="checkbox" id="tutor"> <span data-i18n="settings.tutor"></span></label>
+    <div id="resetArea">
+      <button class="btn" id="resetAll" data-i18n="settings.resetAll"></button>
+    </div>
+    <div class="row"><button class="btn primary" id="closeSettings" data-i18n="close"></button></div>
+  </div>
+</div>
+
+<div class="overlay" id="confirm" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cfTitle">
+    <h2 id="cfTitle"></h2>
+    <p id="cfText" style="margin:0"></p>
+    <div class="row"><button class="btn primary" id="cfYes"></button><button class="btn" id="cfNo" data-i18n="cancel"></button></div>
+  </div>
+</div>
+
+<!-- Editor (se la CDN non risponde, app.js usa una textarea) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+<!-- Lingue dell'interfaccia: en è il riferimento, vedi src/i18n/en.js -->
+<script src="src/i18n/en.js"></script>
+<script src="src/i18n/it.js"></script>
+<!-- Linguaggi: per aggiungerne uno vedi src/languages/README.md -->
+<script src="src/languages/c/interpreter.js"></script>
+<script src="src/languages/c/levels.js"></script>
+<script src="src/languages/c/language.js"></script>
+<!-- Nucleo -->
+<script src="src/core/checker.js"></script>
+<script src="src/core/app.js"></script>
+</body>
+</html>

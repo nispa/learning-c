@@ -1,0 +1,91 @@
+/* English: the reference locale. To add a language, copy this file to <code>.js, translate every
+   value (keep the keys and the {placeholders}), add its <script> in index.html. npm test checks it.
+   Values use the same mini-markup as the levels: `code` and **bold**.
+   A value can be { one, other, ... } for plurals (categories of Intl.PluralRules, chosen by {n}). */
+(function (root, dict) {
+  if (typeof module === 'object' && module.exports) module.exports = dict;
+  else (root.I18N = root.I18N || {}).en = dict;
+})(typeof self !== 'undefined' ? self : this, {
+  'locale.name': 'English',
+  'app.name': 'Step by Step',
+
+  'menu': 'Levels',
+  'menu.aria': 'Open the list of levels',
+  'nav.aria': 'Levels',
+  'task.aria': 'Task',
+  'program.aria': 'Program',
+  'progress': '{n} / {total} levels',
+  'eyebrow': 'Chapter {chapter} · {title} · level {level} of {count}',
+
+  'expected': 'Expected output',
+  'expected.input': 'If the input is `{input}` the program must print:',
+  'hint': 'Hint',
+  'learned': 'What you learned',
+  'solution.show': 'Show solution',
+
+  'editor.saved': 'saved',
+  'editor.edited': 'edited',
+  'run': 'Run',
+  'run.shortcut': 'Ctrl+Enter',
+  'reset': 'Start over',
+  'next': 'Next level',
+  'output': 'Your program\'s output',
+  'console.empty': 'Press ▶ Run to see what the program prints.',
+  'console.input': 'input: {input}',
+  'console.noOutput': '(the program printed nothing)',
+  'console.exit': 'program finished',
+  'console.exitCode': 'program finished with code {code}',
+
+  'where': '{file}, line {line}',
+  'warning': 'Warning',
+  'error.compile': 'The compiler does not understand the program',
+  'error.limit': 'The program was stopped',
+  'error.internal': 'Something went wrong',
+  'error.runtime': 'The program stopped with an error',
+
+  'level.done.title': 'Level already completed ✓',
+  'level.done.text': 'You can try it again or move on to the next one.',
+  'pass.title': 'Correct! ✓',
+  'pass.text': { one: 'The program passed all the checks.', other: 'The program passed all the checks ({n} of {n}).' },
+  'finished.title': 'You have finished all the levels!',
+  'check.chip': 'check {n}',
+
+  'fail.almost': 'Almost!',
+  'fail.rule': 'The output is right, but: {msg}',
+  'fail.patch': 'You changed a line that had to stay the same (for example the starting values of the variables). If you are not sure which one, press ↺ Start over.',
+  'fail.patched': 'To check it, I also ran your program with **different starting values** (as if someone changed the numbers at the top).',
+  'fail.triedInput': 'I ran the program with the input `{input}`.',
+  'fail.withInput': 'With the input `{input}`:',
+  'fail.error.title': 'Not yet: one check stopped with an error',
+  'fail.output.title': 'Not yet: the output is different from the expected one',
+  'fail.noOutput': 'The program printed nothing.',
+  'fail.extraLine': 'The program prints more lines than needed: line {line} is extra.',
+  'fail.missingLine': 'Line {line} is missing.',
+  'fail.caseOnly': 'Line {line} differs only in upper/lower case.',
+  'fail.spacesOnly': 'Line {line} differs only in spaces (spaces are shown as ·).',
+  'fail.different': 'Line {line} is different.',
+  'diff.expected': 'Expected',
+  'diff.yours': 'Your program',
+  'diff.missing': '(missing line)',
+  'diff.empty': '(empty line)',
+
+  'settings': 'Settings',
+  'settings.locale': 'Interface language:',
+  'settings.fontSize': 'Text size:',
+  'settings.fontDown': 'Smaller text',
+  'settings.fontUp': 'Larger text',
+  'settings.tutor': 'Tutor mode (shows the button to see the solution)',
+  'settings.resetAll': 'Delete all progress',
+  'close': 'Close',
+  'cancel': 'Cancel',
+
+  'confirm.reset.title': 'Start the level over?',
+  'confirm.reset.text': 'The code goes back to how it was at the start of the level. Your changes will be lost.',
+  'confirm.reset.yes': 'Yes, start over',
+  'confirm.solution.title': 'Show the solution?',
+  'confirm.solution.text': 'The code in the editor is replaced with a possible solution.',
+  'confirm.solution.yes': 'Show solution',
+  'confirm.resetAll.title': 'Delete all progress?',
+  'confirm.resetAll.text': 'All levels go back to not done and the code you wrote is deleted. This cannot be undone.',
+  'confirm.resetAll.yes': 'Yes, delete everything',
+});
