@@ -1,4 +1,4 @@
-# Passo Passo — C Step by Step
+# C Passo Passo — C Step by Step
 
 **English** · [Italiano](README.it.md)
 
