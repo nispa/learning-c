@@ -1,7 +1,8 @@
 {
   "name": "passo-passo",
   "private": true,
-  "description": "Corso interattivo di programmazione nel browser, livello per livello.",
+  "description": "Interactive programming course in the browser, level by level.",
+  "license": "MIT",
   "scripts": {
     "test": "node --test"
   }

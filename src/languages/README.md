@@ -76,13 +76,9 @@ Una traduzione dei livelli traduce **tutto**: consegne, suggerimenti, ma anche l
 nel codice, gli output attesi, i nomi delle variabili e le regole (`must`, `patch`...) che li citano.
 `npm test` controlla ogni livello in ogni lingua e che capitoli e id siano gli stessi dell'inglese.
 
-## Aggiungere una lingua a un linguaggio
+## Aggiungere una lingua
 
-1. Copia `locales/en/` in `locales/<codice>/` e traduci `strings.js` e `levels.js`
-   (cambia anche la riga finale che registra il file: `.en` diventa `.<codice>`).
-2. Aggiungi i due `<script>` in `index.html`, prima di `language.js`.
-3. Se la lingua dell'interfaccia non esiste ancora, aggiungi anche `src/i18n/<codice>.js`.
-4. `npm test`.
+Il manuale per chi traduce, in inglese, è [docs/adding-a-language.md](../../docs/adding-a-language.md).
 
 ## Aggiungere un linguaggio
 
@@ -91,6 +87,8 @@ nel codice, gli output attesi, i nomi delle variabili e le regole (`must`, `patc
    di un altro modo di CodeMirror (per esempio `mode/rust/rust.min.js`), aggiungi anche quello.
 3. Apri `index.html?language=<id>`.
 4. `npm test` trova da solo il nuovo linguaggio e prova tutti i suoi livelli.
+
+Com'è fatto l'interprete C e come costruirne uno per Python o Rust: [docs/interprete.md](../../docs/interprete.md).
 
 Per eseguire il codice ci sono tre strade, dalla più semplice da mantenere alla più completa:
 

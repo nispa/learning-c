@@ -22,6 +22,8 @@ src/languages/README.md    contratto di un linguaggio, formato dei livelli, come
 src/languages/c/           interprete (senza testi) e definizione del C
 src/languages/c/locales/   per ogni lingua: strings.js (messaggi) e levels.js (livelli)
 tests/                     node:test
+docs/interprete.md         com'è fatto l'interprete C e come farne uno per un altro linguaggio
+docs/adding-a-language.md  manuale per tradurre il corso in una nuova lingua (in inglese)
 ```
 
 I file in `src/` sono moduli UMD: si caricano con `<script>` nel browser e con `require` in Node.
@@ -30,7 +32,7 @@ Mantieni questo formato: niente bundler, niente build, niente ES modules (non fu
 Due parole da non confondere: **language** è il linguaggio di programmazione del corso
 (`src/languages/`), **locale** è la lingua dell'interfaccia (`src/i18n/`).
 
-## Come scrivere codice qui (ispirato a ponytail)
+## Come scrivere codice qui 
 
 Prima leggi il codice e segui il flusso vero. Poi, prima di scrivere, sali questa scala e fermati
 al primo gradino che risolve il problema:
@@ -71,7 +73,8 @@ aggiunge quando arriva il secondo caso che lo usa.
 - Plurali: il valore diventa `{ one: '...', other: '...' }` e si passa `{ n }` a `t()`.
 - Nuova lingua: copia `src/i18n/en.js` in `src/i18n/<codice>.js` e `src/languages/<id>/locales/en/`
   in `locales/<codice>/`, traduci ogni valore, aggiungi i `<script>` in `index.html`.
-  Compare da sola nelle impostazioni. Dettagli in `src/languages/README.md`.
+  Compare da sola nelle impostazioni. Il manuale passo passo (in inglese, per chi traduce) è
+  `docs/adding-a-language.md`: se cambia la procedura, aggiornalo.
 - Se manca una chiave nella lingua scelta, `t()` usa l'inglese; i test però vogliono ogni lingua completa.
 
 ## Qualità
